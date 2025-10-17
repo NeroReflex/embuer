@@ -2,10 +2,18 @@ use rsa::{
     pkcs1::DecodeRsaPublicKey, Error as RSAError, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
 };
 use crate::{config::Config, ServiceError};
+use std::sync::Arc;
+use tokio::{sync::RwLock, task::JoinHandle};
+
+pub struct ServiceInnser {
+    
+}
 
 pub struct Service {
     config: Config,
     pubkey: RsaPublicKey,
+
+    update_checker: JoinHandle<()>,
 }
 
 impl Service {
@@ -29,6 +37,22 @@ impl Service {
             Err(_) => return Err(ServiceError::PubKeyImportError),
         };
 
-        Ok(Self { config, pubkey })
+        let service_data = Arc::new(RwLock::new(ServiceInnser {
+            
+        }));
+
+        let update_checker = {
+            let service_data_clone = service_data.clone();
+            tokio::spawn(async move {
+                Self::update_check(service_data_clone);
+            })
+        };
+
+        Ok(Self { config, pubkey, update_checker })
     }
+
+    pub fn update_check(data: Arc<RwLock<ServiceInnser>>) {
+        
+    }
+
 }
