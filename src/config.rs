@@ -9,7 +9,6 @@ pub struct Config {
     update_url: Option<String>,
     check_for_updates: bool,
     auto_install_updates: bool,
-    notify_on_update: bool,
 
     public_key_pem: Option<String>,
 }
@@ -35,5 +34,23 @@ impl Config {
             return Err(ServiceError::MissingConfigurationError(path));
         }
         Self::from_file(path)
+    }
+
+    /// Return the configured path to the public key PEM file, if any.
+    pub fn public_key_pem_path(&self) -> Option<&str> {
+        self.public_key_pem.as_deref()
+    }
+
+    /// Accessors for config fields for external use/tests.
+    pub fn update_url(&self) -> Option<&str> {
+        self.update_url.as_deref()
+    }
+
+    pub fn check_for_updates(&self) -> bool {
+        self.check_for_updates
+    }
+
+    pub fn auto_install_updates(&self) -> bool {
+        self.auto_install_updates
     }
 }

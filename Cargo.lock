@@ -254,6 +254,7 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "zbus",

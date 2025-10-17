@@ -30,4 +30,7 @@ pub enum ServiceError {
 
     #[error("Join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+
+    #[error("Public key import error")]
+    PubKeyImportError,
 }
