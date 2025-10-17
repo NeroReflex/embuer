@@ -1,5 +1,10 @@
+use std::sync::Arc;
+
 use embuer::{config::Config, dbus::EmbuerDBus, service, ServiceError};
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::RwLock,
+};
 use zbus::connection;
 
 #[tokio::main]
@@ -47,13 +52,13 @@ async fn main() -> Result<(), ServiceError> {
         },
     };
 
-    let service = service::Service::new(config.clone())?;
+    let service = Arc::new(RwLock::new(service::Service::new(config.clone())?));
 
     let dbus_manager = connection::Builder::session()
         .map_err(ServiceError::ZbusError)?
         .name("org.neroreflex.embuer")
         .map_err(ServiceError::ZbusError)?
-        .serve_at("/org/neroreflex/embuer", EmbuerDBus::new(service))
+        .serve_at("/org/neroreflex/embuer", EmbuerDBus::new(service.clone()))
         .map_err(ServiceError::ZbusError)?
         .build()
         .await
@@ -63,10 +68,13 @@ async fn main() -> Result<(), ServiceError> {
 
     // Create a signal listener for SIGTERM
     let mut sigterm =
-        signal(SignalKind::terminate()).expect("🚫 Failed to create SIGTERM signal handler");
+        signal(SignalKind::interrupt()).expect("🚫 Failed to create SIGTERM signal handler");
 
     // Wait for a SIGTERM signal
     sigterm.recv().await;
+
+    println!("🛑 Termination signal received, shutting down...");
+    service.write().await.terminate_update_check().await;
 
     drop(dbus_manager);
 

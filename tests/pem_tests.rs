@@ -1,5 +1,8 @@
 use embuer::{config::Config, service::Service};
-use rsa::{pkcs1::{EncodeRsaPublicKey, LineEnding}, RsaPrivateKey};
+use rsa::{
+    pkcs1::{EncodeRsaPublicKey, LineEnding},
+    RsaPrivateKey,
+};
 use std::io::Write;
 
 #[test]
@@ -17,11 +20,14 @@ fn pem_loading_and_parsing() {
     let tmp_path = tmp.path().to_string_lossy().to_string();
 
     // Build config JSON string pointing to the PEM file path
-    let json = format!(r#"{{
+    let json = format!(
+        r#"{{
         "check_for_updates": false,
         "auto_install_updates": false,
         "public_key_pem": "{}"
-    }}"#, tmp_path);
+    }}"#,
+        tmp_path
+    );
 
     let cfg = Config::new(&json).expect("parse config");
     let svc = Service::new(cfg).expect("service should initialize with valid PEM");
@@ -36,7 +42,10 @@ fn missing_pem_path_fails() {
     }"#;
 
     let cfg = Config::new(json).expect("parse config");
-    assert!(Service::new(cfg).is_err(), "should fail when no public_key_pem");
+    assert!(
+        Service::new(cfg).is_err(),
+        "should fail when no public_key_pem"
+    );
 }
 
 #[test]
@@ -46,11 +55,14 @@ fn invalid_pem_fails() {
     write!(tmp, "not a pem").expect("failed to write");
     let tmp_path = tmp.path().to_string_lossy().to_string();
 
-    let json = format!(r#"{{
+    let json = format!(
+        r#"{{
         "check_for_updates": false,
         "auto_install_updates": false,
         "public_key_pem": "{}"
-    }}"#, tmp_path);
+    }}"#,
+        tmp_path
+    );
 
     let cfg = Config::new(&json).expect("parse config");
     assert!(Service::new(cfg).is_err(), "should fail on invalid PEM");

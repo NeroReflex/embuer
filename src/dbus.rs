@@ -1,13 +1,16 @@
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use zbus::interface;
 
 use crate::{service::Service, ServiceError};
 
 pub struct EmbuerDBus {
-    service: Service,
+    service: Arc<RwLock<Service>>,
 }
 
 impl EmbuerDBus {
-    pub fn new(service: Service) -> Self {
+    pub fn new(service: Arc<RwLock<Service>>) -> Self {
         Self { service }
     }
 }

@@ -1,6 +1,6 @@
 # Embuer
 
-Embuer is an fast, easy-to-use and quick to integrate update daemon especially suited for *embedded* linux systems.
+Embuer is a fast, easy-to-use and quick to integrate update daemon especially suited for *embedded* linux systems.
 
 ## Generating the keypair
 
