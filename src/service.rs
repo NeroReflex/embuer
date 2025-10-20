@@ -6,6 +6,7 @@ use rsa::{
     pkcs1::DecodeRsaPublicKey, Error as RSAError, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
 };
 use std::sync::Arc;
+use tokio::io::AsyncRead as Read;
 use tokio::{io::SimplexStream, sync::RwLock, task::JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_tar::Archive;
@@ -75,6 +76,17 @@ impl Service {
         }
     }
 
+    async fn handle_archive<R>(mut archive: Archive<R>)
+    where
+        R: Read + Unpin,
+    {
+        let mut entries = archive.entries().unwrap();
+        while let Some(file) = entries.next().await {
+            let f = file.unwrap();
+            println!("{}", f.path().unwrap().display());
+        }
+    }
+
     pub async fn update_check(data: Arc<RwLock<ServiceInner>>) {
         let notifications_source = {
             let data_lock = data.read().await;
@@ -102,13 +114,9 @@ impl Service {
 
                             // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
                             let mut archive = Archive::new(reader);
-                            let mut entries = archive.entries().unwrap();
-                            while let Some(file) = entries.next().await {
-                                let f = file.unwrap();
-                                println!("{}", f.path().unwrap().display());
-                            }
+                            Self::handle_archive(archive).await;
 
-                            update_done = true; 
+                            update_done = true;
                         }
                         Err(err) => {
                             eprintln!("request error: {err}");
