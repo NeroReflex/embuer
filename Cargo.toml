@@ -5,21 +5,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "^1", features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
+tokio = { version = "^1", features = ["macros", "rt-multi-thread", "sync", "signal", "time", "process"] }
 rsa = { version = "0.9.7", features = ["pem", "std", "u64_digit"] }
 rand = "0.8.5"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 thiserror = "^2"
 zbus = "^5"
-reqwest = { version = "^0.12", features = ["stream", "json", "gzip", "rustls-tls"] }
-futures-util = "^0.3"
-tokio-tar = { version = "0.3.1", features = [] }
-futures = "0.3.31"
-bytes = "1.10.1"
-tokio-util = "0.7.16"
-tokio-stream = "0.1.17"
-users = "^0.11"
+reqwest = { version = "^0", features = ["stream", "json", "gzip", "rustls-tls"] }
+futures-util = "^0"
+tokio-tar = { version = "^0", features = [] }
+futures = "^0"
+bytes = "^1"
+tokio-util = "^0"
+tokio-stream = "^0"
+users = "^0"
 
 [dev-dependencies]
 tempfile = "3"
