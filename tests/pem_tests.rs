@@ -1,6 +1,6 @@
 use embuer::config::Config;
 use rsa::{
-    pkcs1::{EncodeRsaPublicKey, LineEnding, DecodeRsaPublicKey},
+    pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey, LineEnding},
     RsaPrivateKey,
 };
 use std::io::Write;
@@ -54,7 +54,10 @@ fn missing_pem_path_fails() {
     let cfg = Config::new(json).expect("parse config");
     // Without a public_key_pem path the service initialization would fail.
     // Emulate the same check: ensure `public_key_pem_path()` is None.
-    assert!(cfg.public_key_pem_path().is_none(), "should have no public_key_pem");
+    assert!(
+        cfg.public_key_pem_path().is_none(),
+        "should have no public_key_pem"
+    );
 }
 
 #[test]
@@ -82,5 +85,8 @@ fn invalid_pem_fails() {
         .expect("public_key_pem path present")
         .expect("failed to read pem file");
 
-    assert!(rsa::RsaPublicKey::from_pkcs1_pem(pub_pkcs1_pem.as_str()).is_err(), "should fail on invalid PEM");
+    assert!(
+        rsa::RsaPublicKey::from_pkcs1_pem(pub_pkcs1_pem.as_str()).is_err(),
+        "should fail on invalid PEM"
+    );
 }

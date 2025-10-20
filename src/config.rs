@@ -11,6 +11,9 @@ pub struct Config {
     auto_install_updates: bool,
 
     public_key_pem: Option<String>,
+
+    // Directory where deployments are stored on the filesystem. Optional.
+    deployments_dir: Option<String>,
 }
 
 impl Config {
@@ -39,6 +42,25 @@ impl Config {
     /// Return the configured path to the public key PEM file, if any.
     pub fn public_key_pem_path(&self) -> Option<&str> {
         self.public_key_pem.as_deref()
+    }
+
+    /// Return the configured deployments directory as an owned `PathBuf`, if present and valid.
+    ///
+    /// This returns `Some(PathBuf)` only when the configuration contains a
+    /// `deployments_dir` and the path exists and is a directory. If the
+    /// field is not set or the path does not exist / is not a directory,
+    /// this returns `None`.
+    pub fn deployments_dir(&self) -> Option<std::path::PathBuf> {
+        self.deployments_dir
+            .as_ref()
+            .map(|s| std::path::PathBuf::from(s))
+            .and_then(|p| {
+                if p.exists() && p.is_dir() {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Accessors for config fields for external use/tests.
