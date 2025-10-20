@@ -127,7 +127,7 @@ impl Service {
                     // if an update has already been done just loop waiting for notification
                     if update_done { continue 'check; }
 
-                    match client.get("http://192.168.0.93:8080/some.tar").send().await {
+                    match client.get("http://10.0.0.33:8080/some.tar").send().await {
                         Ok(resp) => {
                             // reqwest gives Stream<Item = Result<Bytes, reqwest::Error>>
                             let byte_stream = resp.bytes_stream()
