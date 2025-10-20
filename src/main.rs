@@ -9,12 +9,10 @@ use zbus::connection;
 
 #[tokio::main]
 async fn main() -> Result<(), ServiceError> {
-    /*
     if users::get_current_uid() != 0 {
         eprintln!("🚫 Application started without root privileges: aborting...");
         return Err(ServiceError::MissingPrivilegesError);
     }
-    */
 
     match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
         Ok(value) => println!("Starting dbus service on socket {value}"),

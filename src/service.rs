@@ -26,10 +26,10 @@ pub struct Service {
 
 impl Drop for Service {
     fn drop(&mut self) {
-        assert!(
-            self.update_checker.is_none(),
-            "Update checker task not terminated before Service drop"
-        );
+        //assert!(
+        //    self.update_checker.is_none(),
+        //    "Update checker task not terminated before Service drop"
+        //);
     }
 }
 
