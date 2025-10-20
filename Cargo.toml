@@ -19,7 +19,7 @@ futures = "0.3.31"
 bytes = "1.10.1"
 tokio-util = "0.7.16"
 tokio-stream = "0.1.17"
-users = "0.11.0"
+users = "^0.11"
 
 [dev-dependencies]
 tempfile = "3"

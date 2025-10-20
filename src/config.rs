@@ -13,7 +13,7 @@ pub struct Config {
     public_key_pem: Option<String>,
 
     // Directory where deployments are stored on the filesystem. Optional.
-    deployments_dir: Option<String>,
+    rootfs_dir: Option<String>,
 }
 
 impl Config {
@@ -50,15 +50,31 @@ impl Config {
     /// `deployments_dir` and the path exists and is a directory. If the
     /// field is not set or the path does not exist / is not a directory,
     /// this returns `None`.
-    pub fn deployments_dir(&self) -> Option<std::path::PathBuf> {
-        self.deployments_dir
+    pub fn rootfs_dir(&self) -> Result<std::path::PathBuf, ServiceError> {
+        let s = self
+            .rootfs_dir
             .as_ref()
-            .map(|s| std::path::PathBuf::from(s))
+            .map_or_else(|| Err(ServiceError::MissingRootfsDir), |a| Ok(a))?;
+
+        let p = std::path::PathBuf::from(s);
+
+        if p.exists() && p.is_dir() {
+            Ok(p)
+        } else {
+            Err(ServiceError::MissingRootfsDir)
+        }
+    }
+
+    /// Return the configured deployments directory which is the `deployments`
+    /// subdirectory under the configured rootfs directory, if present and valid.
+    pub fn deployments_dir(&self) -> Result<std::path::PathBuf, ServiceError> {
+        self.rootfs_dir()
+            .map(|p| p.join("deployments"))
             .and_then(|p| {
                 if p.exists() && p.is_dir() {
-                    Some(p)
+                    Ok(p)
                 } else {
-                    None
+                    Err(ServiceError::MissingDeploymentsDir)
                 }
             })
     }

@@ -26,6 +26,9 @@ pub enum ServiceError {
     #[error("btrfs error: {0}")]
     BtrfsError(String),
 
+    #[error("Missing rootfs directory in configuration")]
+    MissingRootfsDir,
+
     #[error("Missing deployments directory in configuration")]
     MissingDeploymentsDir,
 

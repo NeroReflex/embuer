@@ -14,7 +14,7 @@ use tokio_util::io::StreamReader; // for map_ok / map_err if desired
 pub struct ServiceInner {
     pubkey: RsaPublicKey,
     notify: Arc<tokio::sync::Notify>,
-    deployment_dir: std::path::PathBuf,
+    rootfs_dir: std::path::PathBuf,
 }
 
 pub struct Service {
@@ -37,10 +37,12 @@ impl Drop for Service {
 
 impl Service {
     pub fn new(config: Config, btrfs: Btrfs) -> Result<Self, ServiceError> {
+        // Ensure rootfs_dir is specified and valid in the configuration.
+        config.rootfs_dir()?;
+
         // Ensure deployments_dir is specified and valid in the configuration.
-        if config.deployments_dir().is_none() {
-            return Err(ServiceError::MissingDeploymentsDir);
-        }
+        config.deployments_dir()?;
+
         // Read the configured public key PEM file into memory and parse it.
         let pub_pkcs1_pem = match config.public_key_pem_path() {
             Some(path_str) => std::fs::read_to_string(path_str)?,
@@ -58,13 +60,11 @@ impl Service {
 
         let notify = Arc::new(tokio::sync::Notify::new());
 
-        let deployment_dir = config
-            .deployments_dir()
-            .expect("deployments_dir checked above");
+        let rootfs_dir = config.rootfs_dir().expect("rootfs_dir checked above");
         let service_data = Arc::new(RwLock::new(ServiceInner {
             pubkey,
             notify,
-            deployment_dir,
+            rootfs_dir: rootfs_dir,
         }));
 
         let btrfs = Arc::new(btrfs);
@@ -98,9 +98,16 @@ impl Service {
         R: Read + Unpin,
     {
         let mut entries = archive.entries().unwrap();
-        while let Some(file) = entries.next().await {
-            let f = file.unwrap();
-            println!("{}", f.path().unwrap().display());
+        'update: while let Some(file) = entries.next().await {
+            match file {
+                Ok(f) => {
+                    println!("{}", f.path().unwrap().display());
+                }
+                Err(e) => {
+                    eprintln!("Error reading archive entry: {e}");
+                    break 'update;
+                }
+            }
         }
     }
 
