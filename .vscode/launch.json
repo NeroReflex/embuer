@@ -15,7 +15,7 @@
                 "settings set target.inherit-env false",
             ],
             "env": {
-                "PATH": "/usr/local/sbin:/usr/local/bin:/var/lib/flatpak/exports/bin:/usr/lib/rustup/bin",
+                "PATH": "/usr/bin:/usr/local/sbin:/usr/local/bin:/var/lib/flatpak/exports/bin:/usr/lib/rustup/bin",
             }
         },
         {

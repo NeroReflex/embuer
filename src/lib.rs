@@ -1,5 +1,6 @@
 pub extern crate zbus;
 
+pub mod btrfs;
 pub mod config;
 pub mod dbus;
 pub mod service;
@@ -21,6 +22,12 @@ pub enum ServiceError {
 
     #[error("I/O error: {0}")]
     IOError(#[from] std::io::Error),
+
+    #[error("btrfs error: {0}")]
+    BtrfsError(String),
+
+    #[error("Missing deployments directory in configuration")]
+    MissingDeploymentsDir,
 
     #[error("pkcs1 error: {0}")]
     PKCS1Error(#[from] rsa::pkcs1::Error),

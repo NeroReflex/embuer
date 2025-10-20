@@ -50,7 +50,19 @@ async fn main() -> Result<(), ServiceError> {
         },
     };
 
-    let service = Arc::new(RwLock::new(service::Service::new(config.clone())?));
+    // Probe for btrfs tool and construct wrapper. If this fails, terminate.
+    let btrfs = match embuer::btrfs::Btrfs::new() {
+        Ok(b) => {
+            println!("Found btrfs: {}", b.version());
+            b
+        }
+        Err(e) => {
+            eprintln!("btrfs probe failed: {e}");
+            return Err(e);
+        }
+    };
+
+    let service = Arc::new(RwLock::new(service::Service::new(config.clone(), btrfs)?));
 
     let dbus_manager = connection::Builder::session()
         .map_err(ServiceError::ZbusError)?

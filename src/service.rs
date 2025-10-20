@@ -1,5 +1,4 @@
-use crate::{config::Config, ServiceError};
-use bytes::Bytes;
+use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
 use reqwest::Client;
 use rsa::{
@@ -7,7 +6,7 @@ use rsa::{
 };
 use std::sync::Arc;
 use tokio::io::AsyncRead as Read;
-use tokio::{io::SimplexStream, sync::RwLock, task::JoinHandle};
+use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_tar::Archive;
 use tokio_util::io::StreamReader; // for map_ok / map_err if desired
@@ -15,11 +14,14 @@ use tokio_util::io::StreamReader; // for map_ok / map_err if desired
 pub struct ServiceInner {
     pubkey: RsaPublicKey,
     notify: Arc<tokio::sync::Notify>,
+    deployment_dir: std::path::PathBuf,
 }
 
 pub struct Service {
     config: Config,
     service_data: Arc<RwLock<ServiceInner>>,
+
+    btrfs: Arc<Btrfs>,
 
     update_checker: Option<JoinHandle<()>>,
 }
@@ -34,7 +36,11 @@ impl Drop for Service {
 }
 
 impl Service {
-    pub fn new(config: Config) -> Result<Self, ServiceError> {
+    pub fn new(config: Config, btrfs: Btrfs) -> Result<Self, ServiceError> {
+        // Ensure deployments_dir is specified and valid in the configuration.
+        if config.deployments_dir().is_none() {
+            return Err(ServiceError::MissingDeploymentsDir);
+        }
         // Read the configured public key PEM file into memory and parse it.
         let pub_pkcs1_pem = match config.public_key_pem_path() {
             Some(path_str) => std::fs::read_to_string(path_str)?,
@@ -52,16 +58,27 @@ impl Service {
 
         let notify = Arc::new(tokio::sync::Notify::new());
 
-        let service_data = Arc::new(RwLock::new(ServiceInner { pubkey, notify }));
+        let deployment_dir = config
+            .deployments_dir()
+            .expect("deployments_dir checked above");
+        let service_data = Arc::new(RwLock::new(ServiceInner {
+            pubkey,
+            notify,
+            deployment_dir,
+        }));
+
+        let btrfs = Arc::new(btrfs);
 
         let update_checker = Some({
             let service_data_clone = service_data.clone();
-            tokio::spawn(async move { Self::update_check(service_data_clone).await })
+            let btrfs_clone = btrfs.clone();
+            tokio::spawn(async move { Self::update_check(service_data_clone, btrfs_clone).await })
         });
 
         Ok(Self {
             config,
             service_data,
+            btrfs,
             update_checker,
         })
     }
@@ -87,7 +104,7 @@ impl Service {
         }
     }
 
-    pub async fn update_check(data: Arc<RwLock<ServiceInner>>) {
+    pub async fn update_check(data: Arc<RwLock<ServiceInner>>, btrfs: Arc<Btrfs>) {
         let notifications_source = {
             let data_lock = data.read().await;
             data_lock.notify.clone()
@@ -113,7 +130,10 @@ impl Service {
                             let reader = StreamReader::new(byte_stream);
 
                             // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
-                            let mut archive = Archive::new(reader);
+                            let archive = Archive::new(reader);
+                            // Example usage of btrfs inside update_check:
+                            // (Currently just demonstrate access to version)
+                            println!("btrfs version in update_check: {}", btrfs.version());
                             Self::handle_archive(archive).await;
 
                             update_done = true;
