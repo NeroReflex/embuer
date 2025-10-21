@@ -69,6 +69,7 @@ typedef struct embuer_client_t embuer_client_t;
  * - "Clearing": Clearing old deployments before installation
  * - "Downloading": Downloading update (progress will be 0-100 if size is known)
  * - "Installing": Installing update (progress will be 0-100)
+ * - "AwaitingConfirmation": Update downloaded, awaiting user confirmation
  * - "Completed": Update completed successfully
  * - "Failed": Update failed (details will contain error message)
  */
@@ -77,12 +78,13 @@ typedef void (*StatusCallback)(const char* status, const char* details, int prog
 /**
  * Error codes
  */
-#define EMBUER_OK                0   /* Success */
-#define EMBUER_ERR_NULL_PTR     -1   /* Null pointer passed */
-#define EMBUER_ERR_CONNECTION   -2   /* Connection error */
-#define EMBUER_ERR_DBUS         -3   /* D-Bus error */
-#define EMBUER_ERR_INVALID_STRING -4 /* Invalid string encoding */
-#define EMBUER_ERR_RUNTIME      -5   /* Runtime error */
+#define EMBUER_OK                    0   /* Success */
+#define EMBUER_ERR_NULL_PTR         -1   /* Null pointer passed */
+#define EMBUER_ERR_CONNECTION       -2   /* Connection error */
+#define EMBUER_ERR_DBUS             -3   /* D-Bus error */
+#define EMBUER_ERR_INVALID_STRING   -4   /* Invalid string encoding */
+#define EMBUER_ERR_RUNTIME          -5   /* Runtime error */
+#define EMBUER_ERR_NO_PENDING_UPDATE -6   /* No pending update awaiting confirmation */
 
 /**
  * Initialize a new Embuer client
@@ -164,6 +166,45 @@ int embuer_install_from_url(
  * - s: String to free (can be NULL)
  */
 void embuer_free_string(char* s);
+
+/**
+ * Get the pending update awaiting confirmation
+ * 
+ * Parameters:
+ * - client: Client handle
+ * - version_out: Pointer to receive version string (must be freed with embuer_free_string)
+ * - changelog_out: Pointer to receive changelog string (must be freed with embuer_free_string)
+ * - source_out: Pointer to receive source string (must be freed with embuer_free_string)
+ * 
+ * Returns:
+ * - EMBUER_OK on success
+ * - EMBUER_ERR_NO_PENDING_UPDATE if no update is pending
+ * - Other error code on failure
+ */
+int embuer_get_pending_update(
+    embuer_client_t* client,
+    char** version_out,
+    char** changelog_out,
+    char** source_out
+);
+
+/**
+ * Confirm or reject the pending update
+ * 
+ * Parameters:
+ * - client: Client handle
+ * - accepted: Non-zero (1) to accept and install, zero (0) to reject
+ * - result_out: Pointer to receive result message (must be freed with embuer_free_string)
+ * 
+ * Returns:
+ * - EMBUER_OK on success
+ * - Error code on failure
+ */
+int embuer_confirm_update(
+    embuer_client_t* client,
+    int accepted,
+    char** result_out
+);
 
 /**
  * Watch for status updates (blocking call)

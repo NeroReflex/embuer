@@ -132,6 +132,37 @@ impl EmbuerDBus {
         ))
     }
 
+    /// Get the pending update awaiting confirmation
+    /// Returns: (version: String, changelog: String, source: String)
+    /// Returns an error if no update is pending
+    async fn get_pending_update(&self) -> fdo::Result<(String, String, String)> {
+        let service = self.service.read().await;
+        match service.get_pending_update().await {
+            Some(pending) => Ok((pending.version, pending.changelog, pending.source)),
+            None => Err(fdo::Error::Failed(
+                "No pending update awaiting confirmation".to_string(),
+            )),
+        }
+    }
+
+    /// Confirm or reject the pending update
+    /// 
+    /// Parameters:
+    /// - accepted: true to accept and install, false to reject
+    async fn confirm_update(&self, accepted: bool) -> fdo::Result<String> {
+        let service = self.service.read().await;
+        service
+            .confirm_update(accepted)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("Failed to confirm update: {}", e)))?;
+        
+        if accepted {
+            Ok("Update accepted, installation will proceed".to_string())
+        } else {
+            Ok("Update rejected".to_string())
+        }
+    }
+
     /// DBus signal emitted when update status changes
     /// Arguments: status (string), details (string), progress (i32: 0-100, or -1 if N/A)
     #[zbus(signal)]

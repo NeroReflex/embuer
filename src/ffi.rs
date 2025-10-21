@@ -25,6 +25,7 @@ pub const EMBUER_ERR_CONNECTION: c_int = -2;
 pub const EMBUER_ERR_DBUS: c_int = -3;
 pub const EMBUER_ERR_INVALID_STRING: c_int = -4;
 pub const EMBUER_ERR_RUNTIME: c_int = -5;
+pub const EMBUER_ERR_NO_PENDING_UPDATE: c_int = -6;
 
 /// Initialize a new Embuer client
 /// Returns a handle to the client or NULL on error
@@ -212,6 +213,105 @@ pub extern "C" fn embuer_free_string(s: *mut c_char) {
         unsafe {
             let _ = CString::from_raw(s);
         }
+    }
+}
+
+/// Get the pending update awaiting confirmation
+///
+/// Parameters:
+/// - client: Client handle
+/// - version_out: Pointer to store version string (must be freed with embuer_free_string)
+/// - changelog_out: Pointer to store changelog string (must be freed with embuer_free_string)
+/// - source_out: Pointer to store source string (must be freed with embuer_free_string)
+///
+/// Returns: EMBUER_OK on success, error code otherwise
+#[no_mangle]
+pub extern "C" fn embuer_get_pending_update(
+    client: *mut embuer_client_t,
+    version_out: *mut *mut c_char,
+    changelog_out: *mut *mut c_char,
+    source_out: *mut *mut c_char,
+) -> c_int {
+    if client.is_null() || version_out.is_null() || changelog_out.is_null() || source_out.is_null() {
+        return EMBUER_ERR_NULL_PTR;
+    }
+
+    let client = unsafe { &*client };
+
+    let result = client.runtime.block_on(async {
+        let proxy = EmbuerDBusProxy::new(&client.connection).await?;
+        proxy.get_pending_update().await
+    });
+
+    match result {
+        Ok((version, changelog, source)) => {
+            let version_c = match CString::new(version) {
+                Ok(s) => s,
+                Err(_) => return EMBUER_ERR_INVALID_STRING,
+            };
+
+            let changelog_c = match CString::new(changelog) {
+                Ok(s) => s,
+                Err(_) => return EMBUER_ERR_INVALID_STRING,
+            };
+
+            let source_c = match CString::new(source) {
+                Ok(s) => s,
+                Err(_) => return EMBUER_ERR_INVALID_STRING,
+            };
+
+            unsafe {
+                *version_out = version_c.into_raw();
+                *changelog_out = changelog_c.into_raw();
+                *source_out = source_c.into_raw();
+            }
+
+            EMBUER_OK
+        }
+        Err(_) => EMBUER_ERR_NO_PENDING_UPDATE,
+    }
+}
+
+/// Confirm or reject the pending update
+///
+/// Parameters:
+/// - client: Client handle
+/// - accepted: 1 to accept and install, 0 to reject
+/// - result_out: Pointer to store result message (must be freed with embuer_free_string)
+///
+/// Returns: EMBUER_OK on success, error code otherwise
+#[no_mangle]
+pub extern "C" fn embuer_confirm_update(
+    client: *mut embuer_client_t,
+    accepted: c_int,
+    result_out: *mut *mut c_char,
+) -> c_int {
+    if client.is_null() || result_out.is_null() {
+        return EMBUER_ERR_NULL_PTR;
+    }
+
+    let client = unsafe { &*client };
+    let accepted_bool = accepted != 0;
+
+    let result = client.runtime.block_on(async {
+        let proxy = EmbuerDBusProxy::new(&client.connection).await?;
+        proxy.confirm_update(accepted_bool).await
+    });
+
+    match result {
+        Ok(msg) => {
+            let msg_c = match CString::new(msg) {
+                Ok(s) => s,
+                Err(_) => return EMBUER_ERR_INVALID_STRING,
+            };
+
+            unsafe {
+                *result_out = msg_c.into_raw();
+            }
+
+            EMBUER_OK
+        }
+        Err(_) => EMBUER_ERR_DBUS,
     }
 }
 

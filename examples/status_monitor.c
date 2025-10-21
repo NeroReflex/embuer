@@ -50,20 +50,22 @@ void print_status(const char* status, const char* details, int progress) {
     
     // Color-code based on status
     if (strcmp(status, "Idle") == 0) {
-        printf("\033[0;32m");  // Green
+        printf("\033[0;90m");  // Gray (bright black)
     } else if (strcmp(status, "Clearing") == 0) {
         printf("\033[0;35m");  // Magenta
     } else if (strcmp(status, "Downloading") == 0) {
         printf("\033[0;36m");  // Cyan
     } else if (strcmp(status, "Installing") == 0) {
         printf("\033[0;33m");  // Yellow
+    } else if (strcmp(status, "AwaitingConfirmation") == 0) {
+        printf("\033[1;33m");  // Bold Yellow
     } else if (strcmp(status, "Failed") == 0) {
         printf("\033[0;31m");  // Red
     } else if (strcmp(status, "Completed") == 0) {
         printf("\033[0;32m");  // Green
     }
     
-    printf("%-15s\033[0m", status);  // Reset color
+    printf("%-20s\033[0m", status);  // Reset color
     
     printf(" │ %-40s", details);
     
@@ -105,6 +107,27 @@ void on_status_changed(
     (*update_count)++;
     
     print_status(status, details, progress);
+    
+    // Alert user when confirmation is required
+    if (strcmp(status, "AwaitingConfirmation") == 0) {
+        printf("\n");
+        printf("\033[1;33m"); // Bold yellow
+        printf("╔════════════════════════════════════════════════════════════════════════════╗\n");
+        printf("║                        ⚠️  USER CONFIRMATION REQUIRED  ⚠️                    ║\n");
+        printf("╠════════════════════════════════════════════════════════════════════════════╣\n");
+        printf("║ An update is ready to install but requires your approval.                 ║\n");
+        printf("║                                                                            ║\n");
+        printf("║ To view the changelog and decide:                                         ║\n");
+        printf("║   embuer-client pending-update    - View update details                   ║\n");
+        printf("║   embuer-client accept            - Accept and install                    ║\n");
+        printf("║   embuer-client reject            - Reject this update                    ║\n");
+        printf("║                                                                            ║\n");
+        printf("║ Or use the interactive update_confirmation tool:                          ║\n");
+        printf("║   ./update_confirmation                                                   ║\n");
+        printf("╚════════════════════════════════════════════════════════════════════════════╝\n");
+        printf("\033[0m"); // Reset color
+        printf("\n");
+    }
 }
 
 /**

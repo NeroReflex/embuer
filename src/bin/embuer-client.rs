@@ -53,6 +53,24 @@ async fn main() {
                 process::exit(1);
             }
         }
+        "pending-update" => {
+            if let Err(e) = get_pending_update().await {
+                eprintln!("Error getting pending update: {}", e);
+                process::exit(1);
+            }
+        }
+        "accept" => {
+            if let Err(e) = confirm_update(true).await {
+                eprintln!("Error accepting update: {}", e);
+                process::exit(1);
+            }
+        }
+        "reject" => {
+            if let Err(e) = confirm_update(false).await {
+                eprintln!("Error rejecting update: {}", e);
+                process::exit(1);
+            }
+        }
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
         }
@@ -74,6 +92,9 @@ fn print_usage(program_name: &str) {
     println!("  watch               Watch for status changes in real-time");
     println!("  install-file <path> Install an update from a local file");
     println!("  install-url <url>   Install an update from a URL");
+    println!("  pending-update      Show details of pending update awaiting confirmation");
+    println!("  accept              Accept the pending update and proceed with installation");
+    println!("  reject              Reject the pending update");
     println!("  help                Show this help message");
     println!();
     println!("Examples:");
@@ -83,6 +104,8 @@ fn print_usage(program_name: &str) {
         "  {} install-url https://example.com/update.tar.gz",
         program_name
     );
+    println!("  {} pending-update", program_name);
+    println!("  {} accept", program_name);
 }
 
 async fn get_connection() -> Result<Connection, Box<dyn std::error::Error>> {
@@ -156,6 +179,47 @@ async fn install_from_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let result = proxy.install_update_from_url(url.to_string()).await?;
     println!("{}", result);
+
+    Ok(())
+}
+
+async fn get_pending_update() -> Result<(), Box<dyn std::error::Error>> {
+    let connection = get_connection().await?;
+    let proxy = EmbuerDBusProxy::new(&connection).await?;
+
+    let (version, changelog, source) = proxy.get_pending_update().await?;
+
+    println!("╔════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                          PENDING UPDATE                                    ║");
+    println!("╠════════════════════════════════════════════════════════════════════════════╣");
+    println!("║ Version: {:<66} ║", version);
+    println!("║ Source:  {:<66} ║", source);
+    println!("╠════════════════════════════════════════════════════════════════════════════╣");
+    println!("║ CHANGELOG                                                                  ║");
+    println!("╠════════════════════════════════════════════════════════════════════════════╣");
+    
+    for line in changelog.lines() {
+        println!("║ {:<74} ║", line);
+    }
+    
+    println!("╠════════════════════════════════════════════════════════════════════════════╣");
+    println!("║ Use 'embuer-client accept' to install or 'embuer-client reject' to cancel ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════╝");
+
+    Ok(())
+}
+
+async fn confirm_update(accepted: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let connection = get_connection().await?;
+    let proxy = EmbuerDBusProxy::new(&connection).await?;
+
+    let result = proxy.confirm_update(accepted).await?;
+    
+    if accepted {
+        println!("✓ {}", result);
+    } else {
+        println!("✗ {}", result);
+    }
 
     Ok(())
 }
