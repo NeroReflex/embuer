@@ -21,6 +21,7 @@ tokio-util = "^0"
 tokio-stream = "^0"
 users = "^0"
 nix = { version = "^0", features = ["fs"] }
+#libc = "^0"
 
 [dev-dependencies]
 tempfile = "3"

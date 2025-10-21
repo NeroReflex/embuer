@@ -27,21 +27,33 @@ impl EmbuerDBus {
             };
 
             let mut last_status = UpdateStatus::Idle;
+            let mut last_progress = -1;
 
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 let current_status = status_handle.read().await.clone();
+                let current_progress = current_status.progress();
 
-                if current_status != last_status {
-                    println!("Status changed: {:?} -> {:?}", last_status, current_status);
+                // Emit signal if status changed OR progress changed
+                let should_emit = current_status.as_str() != last_status.as_str()
+                    || current_status.details() != last_status.details()
+                    || current_progress != last_progress;
 
+                if should_emit {
+                    println!(
+                        "Status update: {} - {} ({}%)",
+                        current_status.as_str(),
+                        current_status.details(),
+                        current_progress
+                    );
+                    
                     // Emit DBus signal with progress
                     if let Err(e) = EmbuerDBus::update_status_changed(
                         &signal_emitter,
                         current_status.as_str(),
                         &current_status.details(),
-                        current_status.progress(),
+                        current_progress,
                     )
                     .await
                     {
@@ -49,6 +61,7 @@ impl EmbuerDBus {
                     }
 
                     last_status = current_status;
+                    last_progress = current_progress;
                 }
             }
         });

@@ -196,29 +196,45 @@ impl ServiceInner {
 
         // Pipe input stream -> xz stdin
         let input_to_xz = tokio::spawn(async move {
-            let result = tokio::io::copy(&mut input_stream, &mut xz_stdin).await;
-            if let Err(e) = result {
-                eprintln!("Error piping data to xz: {}", e);
+            match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
+                Ok(bytes) => println!("Piped {} bytes to xz decompressor", bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                    eprintln!("⚠️  Broken pipe while sending to xz (xz may have finished early)");
+                }
+                Err(e) => {
+                    eprintln!("❌ Error piping data to xz: {}", e);
+                }
             }
             // Signal EOF to xz
-            let _ = xz_stdin.shutdown().await;
+            if let Err(e) = xz_stdin.shutdown().await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    eprintln!("⚠️  Error closing xz stdin: {}", e);
+                }
+            }
         });
 
         // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
+        println!("Starting btrfs receive...");
         let subvolume = btrfs.receive(&self.deployments_dir, xz_stdout).await;
 
         // Wait for piping task
-        let _ = input_to_xz.await;
+        if let Err(e) = input_to_xz.await {
+            eprintln!("⚠️  Piping task panicked: {}", e);
+        }
 
         // Wait for xz process to finish
         let xz_status = xz_proc.wait().await?;
         if !xz_status.success() {
+            let error_msg = format!("xz decompressor failed with status: {}", xz_status);
+            eprintln!("❌ {}", error_msg);
             return Err(ServiceError::IOError(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("xz -d failed with status: {}", xz_status),
+                error_msg,
             )));
         }
 
+        println!("✅ xz decompression completed successfully");
+        
         // Return the received subvolume name
         subvolume
     }
