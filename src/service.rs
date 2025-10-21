@@ -22,7 +22,7 @@ impl ServiceInner {
         &self,
         btrfs: &Btrfs,
         mut input_stream: R,
-    ) -> Result<(), ServiceError>
+    ) -> Result<Option<String>, ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
@@ -59,7 +59,7 @@ impl ServiceInner {
         });
 
         // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
-        let btrfs_result = btrfs.receive(&self.deployments_dir, xz_stdout).await;
+        let subvolume = btrfs.receive(&self.deployments_dir, xz_stdout).await;
 
         // Wait for piping task
         let _ = input_to_xz.await;
@@ -73,10 +73,8 @@ impl ServiceInner {
             )));
         }
 
-        // Return the btrfs receive result
-        btrfs_result?;
-
-        Ok(())
+        // Return the received subvolume name
+        subvolume
     }
 }
 
@@ -200,7 +198,18 @@ impl Service {
                             // StreamReader expects Stream<Item = Result<impl Buf, E>>
                             let reader = StreamReader::new(byte_stream);
 
-                            data.read().await.receive_btrfs_stream(&btrfs, reader).await.unwrap();
+                            let subvolume = data.read().await.receive_btrfs_stream(&btrfs, reader).await.unwrap();
+                            match subvolume {
+                                Some(name) => {
+                                    println!("Received subvolume: {}", name);
+                                    let subvolume_path = data.read().await.deployments_dir.join(name);
+                                    match btrfs.btrfs_subvol_get_id(subvolume_path) {
+                                        Ok(subvolid) => println!("Created btrfs subvolume with id {subvolid}"),
+                                        Err(e) => println!("Error checking if subvolume is a btrfs subvolume: {e}"),
+                                    }
+                                },
+                                None => println!("No subvolume name found in btrfs receive output"),
+                            }
 /*
                             // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
                             let archive = Archive::new(reader);

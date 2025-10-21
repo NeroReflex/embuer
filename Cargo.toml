@@ -20,6 +20,7 @@ bytes = "^1"
 tokio-util = "^0"
 tokio-stream = "^0"
 users = "^0"
+nix = { version = "^0", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"

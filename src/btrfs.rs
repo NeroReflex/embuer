@@ -1,7 +1,8 @@
 use crate::ServiceError;
 use std::process::Command;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command as TokioCommand;
+use std::os::unix::fs::MetadataExt;
 
 /// Lightweight wrapper for invoking the `btrfs` command-line tool.
 ///
@@ -67,13 +68,14 @@ impl Btrfs {
     /// Run `btrfs receive` asynchronously, reading from the provided stream.
     ///
     /// This method spawns `btrfs receive -e <path>` and pipes data from
-    /// `input_stream` to its stdin. Returns an error if the process fails
-    /// to spawn or exits with a non-zero status.
+    /// `input_stream` to its stdin. Returns the received subvolume name
+    /// parsed from stderr (line like "At subvol subvolname"), or None if not found.
+    /// Returns an error if the process fails to spawn or exits with a non-zero status.
     pub async fn receive<R, P>(
         &self,
         path: P,
         mut input_stream: R,
-    ) -> Result<(), ServiceError>
+    ) -> Result<Option<String>, ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         P: AsRef<std::path::Path>,
@@ -85,6 +87,7 @@ impl Btrfs {
             .arg(path.as_ref().as_os_str())
             .arg("-e")
             .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(ServiceError::IOError)?;
 
@@ -95,6 +98,13 @@ impl Btrfs {
             ))
         })?;
 
+        let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to open stderr for btrfs receive",
+            ))
+        })?;
+
         // Pipe input stream -> btrfs stdin
         let pipe_task = tokio::spawn(async move {
             let result = tokio::io::copy(&mut input_stream, &mut btrfs_stdin).await;
@@ -102,6 +112,21 @@ impl Btrfs {
                 eprintln!("Error piping data to btrfs receive: {}", e);
             }
             let _ = btrfs_stdin.shutdown().await;
+        });
+
+        // Read and parse stderr to extract subvolume name
+        let stderr_task = tokio::spawn(async move {
+            let reader = BufReader::new(btrfs_stderr);
+            let mut lines = reader.lines();
+            
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Parse line like "At subvol subvolname"
+                if let Some(subvol_name) = line.strip_prefix("At subvol ") {
+                    return Some(subvol_name.to_string());
+                }
+            }
+            
+            None
         });
 
         // Wait for piping to complete
@@ -116,6 +141,102 @@ impl Btrfs {
             )));
         }
 
-        Ok(())
+        // Get the parsed subvolume name
+        let subvolume = stderr_task.await.map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read btrfs receive output: {}", e),
+            ))
+        })?;
+
+        Ok(subvolume)
+    }
+
+    /// Check if the given directory is a btrfs subvolume.
+    ///
+    /// This method verifies two conditions:
+    /// 1. The directory is on a btrfs filesystem
+    /// 2. The directory's inode number is 2 or 256 (characteristic of btrfs subvolumes)
+    ///
+    /// Returns `true` if both conditions are met, `false` otherwise.
+    /// Returns an error if the directory doesn't exist or cannot be accessed.
+    pub fn is_btrfs_subvolume<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> Result<bool, ServiceError> {
+        use nix::sys::statfs::statfs;
+        
+        const BTRFS_SUPER_MAGIC: i64 = 0x9123683e;
+        
+        let path_ref = path.as_ref();
+        
+        // Check if the filesystem type is btrfs
+        let fs_stat = statfs(path_ref).map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to get filesystem info for {:?}: {}", path_ref, e),
+            ))
+        })?;
+        
+        if fs_stat.filesystem_type().0 != BTRFS_SUPER_MAGIC {
+            return Ok(false);
+        }
+        
+        // Get the inode number
+        let metadata = std::fs::metadata(path_ref)?;
+        let inode = metadata.ino();
+        
+        // Btrfs subvolumes have inode number 2 or 256
+        Ok(inode == 2 || inode == 256)
+    }
+
+    /// Get the btrfs subvolume ID of the given subvolume path.
+    ///
+    /// This method first verifies that the path is a btrfs subvolume,
+    /// then runs `btrfs subvolume show` to retrieve the subvolume ID.
+    ///
+    /// Returns the subvolume ID as a `u64` on success.
+    /// Returns an error if the path is not a btrfs subvolume or if
+    /// the ID cannot be retrieved or parsed.
+    pub fn btrfs_subvol_get_id<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> Result<u64, ServiceError> {
+        let path_ref = path.as_ref();
+        
+        // First check if it's a btrfs subvolume
+        if !self.is_btrfs_subvolume(path_ref)? {
+            return Err(ServiceError::BtrfsError(format!(
+                "{:?} is not a valid btrfs subvolume",
+                path_ref
+            )));
+        }
+        
+        // Run btrfs subvolume show
+        let output = self.run_and_get_stdout([
+            "subvolume",
+            "show",
+            &path_ref.to_string_lossy(),
+        ])?;
+        
+        // Parse the output to find "Subvolume ID:" line
+        for line in output.lines() {
+            let trimmed = line.trim_start();
+            if let Some(id_part) = trimmed.strip_prefix("Subvolume ID:") {
+                let subvol_id = id_part.trim().parse::<u64>().map_err(|e| {
+                    ServiceError::BtrfsError(format!(
+                        "Failed to parse subvolume ID from '{}': {}",
+                        id_part.trim(),
+                        e
+                    ))
+                })?;
+                return Ok(subvol_id);
+            }
+        }
+        
+        Err(ServiceError::BtrfsError(format!(
+            "Could not find 'Subvolume ID:' in output for {:?}",
+            path_ref
+        )))
     }
 }
