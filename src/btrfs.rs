@@ -1,5 +1,7 @@
 use crate::ServiceError;
 use std::process::Command;
+use tokio::io::AsyncRead;
+use tokio::process::Command as TokioCommand;
 
 /// Lightweight wrapper for invoking the `btrfs` command-line tool.
 ///
@@ -60,5 +62,60 @@ impl Btrfs {
     ) -> Result<String, ServiceError> {
         let p = path.as_ref().to_string_lossy().to_string();
         self.run_and_get_stdout(["subvolume", "list", &p])
+    }
+
+    /// Run `btrfs receive` asynchronously, reading from the provided stream.
+    ///
+    /// This method spawns `btrfs receive -e <path>` and pipes data from
+    /// `input_stream` to its stdin. Returns an error if the process fails
+    /// to spawn or exits with a non-zero status.
+    pub async fn receive<R, P>(
+        &self,
+        path: P,
+        mut input_stream: R,
+    ) -> Result<(), ServiceError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        P: AsRef<std::path::Path>,
+    {
+        use tokio::io::AsyncWriteExt;
+
+        let mut btrfs_proc = TokioCommand::new("btrfs")
+            .arg("receive")
+            .arg(path.as_ref().as_os_str())
+            .arg("-e")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(ServiceError::IOError)?;
+
+        let mut btrfs_stdin = btrfs_proc.stdin.take().ok_or_else(|| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to open stdin for btrfs receive",
+            ))
+        })?;
+
+        // Pipe input stream -> btrfs stdin
+        let pipe_task = tokio::spawn(async move {
+            let result = tokio::io::copy(&mut input_stream, &mut btrfs_stdin).await;
+            if let Err(e) = result {
+                eprintln!("Error piping data to btrfs receive: {}", e);
+            }
+            let _ = btrfs_stdin.shutdown().await;
+        });
+
+        // Wait for piping to complete
+        let _ = pipe_task.await;
+
+        // Wait for btrfs receive to finish
+        let btrfs_status = btrfs_proc.wait().await?;
+        if !btrfs_status.success() {
+            return Err(ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("btrfs receive failed with status: {}", btrfs_status),
+            )));
+        }
+
+        Ok(())
     }
 }

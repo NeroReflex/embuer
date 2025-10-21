@@ -2,9 +2,8 @@ use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
-use std::io::Cursor;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_stream::StreamExt;
@@ -19,7 +18,11 @@ pub struct ServiceInner {
 }
 
 impl ServiceInner {
-    pub async fn receive_btrfs_stream<R>(&self, mut input_stream: R) -> Result<(), ServiceError>
+    pub async fn receive_btrfs_stream<R>(
+        &self,
+        btrfs: &Btrfs,
+        mut input_stream: R,
+    ) -> Result<(), ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
@@ -38,7 +41,7 @@ impl ServiceInner {
             ))
         })?;
 
-        let mut xz_stdout = xz_proc.stdout.take().ok_or_else(|| {
+        let xz_stdout = xz_proc.stdout.take().ok_or_else(|| {
             ServiceError::IOError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Failed to open stdout for xz",
@@ -55,35 +58,13 @@ impl ServiceInner {
             let _ = xz_stdin.shutdown().await;
         });
 
-        // Spawn btrfs receive
-        let mut btrfs_proc = Command::new("btrfs")
-            .arg("receive")
-            .arg(self.deployments_dir.as_os_str())
-            .arg("-e")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(ServiceError::IOError)?;
+        // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
+        let btrfs_result = btrfs.receive(&self.deployments_dir, xz_stdout).await;
 
-        let mut btrfs_stdin = btrfs_proc.stdin.take().ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to open stdin for btrfs receive",
-            ))
-        })?;
+        // Wait for piping task
+        let _ = input_to_xz.await;
 
-        // Pipe xz stdout -> btrfs stdin
-        let xz_to_btrfs = tokio::spawn(async move {
-            let result = tokio::io::copy(&mut xz_stdout, &mut btrfs_stdin).await;
-            if let Err(e) = result {
-                eprintln!("Error piping data to btrfs receive: {}", e);
-            }
-            let _ = btrfs_stdin.shutdown().await;
-        });
-
-        // Wait for piping tasks
-        let (_input_res, _xz_res) = tokio::join!(input_to_xz, xz_to_btrfs);
-
-        // Wait for both processes to finish
+        // Wait for xz process to finish
         let xz_status = xz_proc.wait().await?;
         if !xz_status.success() {
             return Err(ServiceError::IOError(std::io::Error::new(
@@ -92,13 +73,8 @@ impl ServiceInner {
             )));
         }
 
-        let btrfs_status = btrfs_proc.wait().await?;
-        if !btrfs_status.success() {
-            return Err(ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("btrfs receive failed with status: {}", btrfs_status),
-            )));
-        }
+        // Return the btrfs receive result
+        btrfs_result?;
 
         Ok(())
     }
@@ -224,7 +200,7 @@ impl Service {
                             // StreamReader expects Stream<Item = Result<impl Buf, E>>
                             let reader = StreamReader::new(byte_stream);
 
-                            data.read().await.receive_btrfs_stream(reader).await.unwrap();
+                            data.read().await.receive_btrfs_stream(&btrfs, reader).await.unwrap();
 /*
                             // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
                             let archive = Archive::new(reader);
