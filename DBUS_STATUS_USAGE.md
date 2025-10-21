@@ -17,6 +17,7 @@ The embuer service now exposes update status via DBus without requiring polling.
 
 - **Idle** - No update in progress
 - **Checking** - Checking for updates (reserved for future use)
+- **Clearing** - Clearing old deployments before installation
 - **Downloading** - Downloading an update from a URL
 - **Installing** - Installing an update
 - **Completed** - Update successfully installed
@@ -29,7 +30,7 @@ The embuer service now exposes update status via DBus without requiring polling.
 Get the current update status with progress information.
 
 **Returns:**
-- `status`: Current status (Idle, Downloading, Installing, Completed, Failed)
+- `status`: Current status (Idle, Clearing, Downloading, Installing, Completed, Failed)
 - `details`: Additional information (e.g., URL being downloaded, error message)
 - `progress`: Progress percentage (0-100) for Downloading/Installing, or -1 if not applicable or size unknown
 
@@ -59,7 +60,7 @@ Queue an update from a URL.
 Emitted automatically when the update status changes. **No polling required!**
 
 **Arguments:**
-- `status`: Current status (Idle, Downloading, Installing, Completed, Failed)
+- `status`: Current status (Idle, Clearing, Downloading, Installing, Completed, Failed)
 - `details`: Additional information about the status
 - `progress`: Progress percentage (0-100) for active downloads/installs, -1 otherwise
 
@@ -74,7 +75,10 @@ embuer = bus.get("org.neroreflex.embuer", "/org/neroreflex/embuer")
 def on_status_changed(status, details, progress):
     print(f"Update status: {status} - {details} ({progress}%)")
     # Update your GUI/taskbar icon and progress bar here
-    if status in ["Downloading", "Installing"] and progress >= 0:
+    if status == "Clearing":
+        # Show preparing status
+        print("Clearing old deployments...")
+    elif status in ["Downloading", "Installing"] and progress >= 0:
         # Update progress bar to show progress%
         print(f"Progress: {progress}%")
     elif status == "Completed":

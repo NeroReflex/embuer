@@ -58,10 +58,19 @@ typedef struct embuer_client_t embuer_client_t;
  * Status callback function type
  * 
  * Parameters:
- * - status: Current status string
+ * - status: Current status string (see possible values below)
  * - details: Status details string
  * - progress: Progress value (0-100, or -1 if N/A)
  * - user_data: User-provided data pointer
+ * 
+ * Possible status values:
+ * - "Idle": No update in progress
+ * - "Checking": Checking for updates
+ * - "Clearing": Clearing old deployments before installation
+ * - "Downloading": Downloading update (progress will be 0-100 if size is known)
+ * - "Installing": Installing update (progress will be 0-100)
+ * - "Completed": Update completed successfully
+ * - "Failed": Update failed (details will contain error message)
  */
 typedef void (*StatusCallback)(const char* status, const char* details, int progress, void* user_data);
 

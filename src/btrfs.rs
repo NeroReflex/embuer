@@ -371,4 +371,97 @@ impl Btrfs {
 
         Ok(())
     }
+
+    /// Get the default subvolume ID for a btrfs filesystem.
+    ///
+    /// This method returns the ID of the subvolume that will be mounted
+    /// by default when the btrfs filesystem is mounted without specifying
+    /// a subvolume.
+    ///
+    /// # Arguments
+    ///
+    /// * `rootfs` - Path to the btrfs filesystem root
+    ///
+    /// Returns the default subvolume ID as a `u64` on success.
+    /// Returns an error if the command fails or the ID cannot be parsed.
+    pub fn subvolume_get_default<P: AsRef<std::path::Path>>(
+        &self,
+        rootfs: P,
+    ) -> Result<u64, ServiceError> {
+        let rootfs_ref = rootfs.as_ref();
+
+        let output = self.run_and_get_stdout([
+            "subvolume",
+            "get-default",
+            &rootfs_ref.to_string_lossy(),
+        ])?;
+
+        // Parse output like "ID 256 gen 123 top level 5 path deployments/current"
+        // or "ID 5 (FS_TREE)"
+        for word in output.split_whitespace() {
+            if let Ok(id) = word.parse::<u64>() {
+                return Ok(id);
+            }
+        }
+
+        Err(ServiceError::BtrfsError(format!(
+            "Could not parse default subvolume ID from output: {}",
+            output
+        )))
+    }
+
+    /// Delete a btrfs subvolume.
+    ///
+    /// This method deletes the specified subvolume. The subvolume must
+    /// not be currently mounted and must not be the default subvolume.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the subvolume to delete
+    ///
+    /// Returns `Ok(())` on success.
+    /// Returns an error if the command fails.
+    pub fn subvolume_delete<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), ServiceError> {
+        let path_ref = path.as_ref();
+
+        self.run_and_get_stdout(["subvolume", "delete", &path_ref.to_string_lossy()])?;
+
+        Ok(())
+    }
+
+    /// List all deployment subvolumes in the deployments directory.
+    ///
+    /// This method reads the deployments directory and returns a list
+    /// of all entries that are btrfs subvolumes.
+    ///
+    /// # Arguments
+    ///
+    /// * `deployments_dir` - Path to the deployments directory
+    ///
+    /// Returns a vector of tuples containing (subvolume_name, subvolume_id, full_path)
+    /// Returns an error if the directory cannot be read.
+    pub fn list_deployment_subvolumes<P: AsRef<std::path::Path>>(
+        &self,
+        deployments_dir: P,
+    ) -> Result<Vec<(String, u64, std::path::PathBuf)>, ServiceError> {
+        let deployments_ref = deployments_dir.as_ref();
+
+        let mut result = Vec::new();
+
+        let entries = std::fs::read_dir(deployments_ref)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Check if it's a directory and a btrfs subvolume
+            if path.is_dir() && self.is_btrfs_subvolume(&path)? {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let id = self.btrfs_subvol_get_id(&path)?;
+                result.push((name, id, path));
+            }
+        }
+
+        Ok(result)
+    }
 }

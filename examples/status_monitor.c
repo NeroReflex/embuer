@@ -51,6 +51,8 @@ void print_status(const char* status, const char* details, int progress) {
     // Color-code based on status
     if (strcmp(status, "Idle") == 0) {
         printf("\033[0;32m");  // Green
+    } else if (strcmp(status, "Clearing") == 0) {
+        printf("\033[0;35m");  // Magenta
     } else if (strcmp(status, "Downloading") == 0) {
         printf("\033[0;36m");  // Cyan
     } else if (strcmp(status, "Installing") == 0) {

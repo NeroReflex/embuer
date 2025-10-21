@@ -35,6 +35,8 @@ pub enum UpdateStatus {
     Idle,
     /// Checking for updates
     Checking,
+    /// Clearing old deployments
+    Clearing,
     /// Downloading update (with progress 0-100, or -1 if unknown)
     Downloading { source: String, progress: i32 },
     /// Installing update (with progress 0-100, or -1 if unknown)
@@ -51,6 +53,7 @@ impl UpdateStatus {
         match self {
             UpdateStatus::Idle => "Idle",
             UpdateStatus::Checking => "Checking",
+            UpdateStatus::Clearing => "Clearing",
             UpdateStatus::Downloading { .. } => "Downloading",
             UpdateStatus::Installing { .. } => "Installing",
             UpdateStatus::Completed { .. } => "Completed",
@@ -63,6 +66,7 @@ impl UpdateStatus {
         match self {
             UpdateStatus::Idle => String::new(),
             UpdateStatus::Checking => String::new(),
+            UpdateStatus::Clearing => String::new(),
             UpdateStatus::Downloading { source, .. } => source.clone(),
             UpdateStatus::Installing { source, .. } => source.clone(),
             UpdateStatus::Completed { source } => source.clone(),
@@ -162,6 +166,10 @@ pub struct ServiceInner {
     rootfs_dir: std::path::PathBuf,
     deployments_dir: std::path::PathBuf,
     update_status: Arc<RwLock<UpdateStatus>>,
+    /// The default subvolume ID when the service started.
+    /// This is the currently running deployment and must NEVER be deleted,
+    /// even if a new update has changed the default subvolume.
+    initial_default_subvol_id: u64,
 }
 
 impl ServiceInner {
@@ -216,7 +224,7 @@ impl ServiceInner {
 
         // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
         debug!("Starting btrfs receive...");
-        let subvolume = btrfs.receive(&self.deployments_dir, xz_stdout).await;
+        let subvolume_result = btrfs.receive(&self.deployments_dir, xz_stdout).await;
 
         // Wait for piping task
         if let Err(e) = input_to_xz.await {
@@ -236,8 +244,18 @@ impl ServiceInner {
 
         debug!("xz decompression completed successfully");
 
-        // Return the received subvolume name
-        subvolume
+        // Check if btrfs receive succeeded
+        match subvolume_result {
+            Ok(subvol) => Ok(subvol),
+            Err(e) => {
+                // Check if the error is due to an existing subvolume
+                let error_string = e.to_string();
+                if error_string.contains("already exists") {
+                    warn!("Subvolume already exists, this should have been cleaned up");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Set status helper
@@ -289,12 +307,23 @@ impl Service {
         let notify = Arc::new(tokio::sync::Notify::new());
         let update_status = Arc::new(RwLock::new(UpdateStatus::Idle));
 
+        // CRITICAL: Record the default subvolume ID at service startup.
+        // This is the currently running deployment and must NEVER be deleted,
+        // even if subsequent updates change the default subvolume.
+        // Deleting the running deployment would crash the system!
+        let initial_default_subvol_id = btrfs.subvolume_get_default(&rootfs_dir)?;
+        info!(
+            "Service starting - running deployment has subvolume ID: {}",
+            initial_default_subvol_id
+        );
+
         let service_data = Arc::new(RwLock::new(ServiceInner {
             pubkey,
             notify,
             rootfs_dir,
             deployments_dir,
             update_status,
+            initial_default_subvol_id,
         }));
 
         let btrfs = Arc::new(btrfs);
@@ -378,6 +407,81 @@ impl Service {
                 Err(err) => error!("Error terminating update request loop task: {err}"),
             }
         }
+    }
+
+    /// Clear old deployments, preserving the running and default subvolumes.
+    ///
+    /// This method:
+    /// 1. Gets the initial default subvolume ID (currently running deployment)
+    /// 2. Gets the current default subvolume ID (for next boot)
+    /// 3. Lists all deployment subvolumes
+    /// 4. Deletes all subvolumes EXCEPT:
+    ///    - The initial default (currently running - CRITICAL for system stability)
+    ///    - The current default (will be active after reboot)
+    ///
+    /// SAFETY: We must protect BOTH the initial and current default subvolumes.
+    /// If the system hasn't rebooted after an update, the initial default is still
+    /// the running system. Deleting it would crash the system and cause data loss!
+    ///
+    /// Returns the number of deployments cleared.
+    async fn clear_old_deployments(
+        data: &Arc<RwLock<ServiceInner>>,
+        btrfs: &Arc<Btrfs>,
+    ) -> Result<usize, ServiceError> {
+        let data_guard = data.read().await;
+        
+        info!("Clearing old deployments...");
+        
+        // CRITICAL: Get the initial default subvolume ID (running deployment)
+        // This was recorded when the service started and must NEVER be deleted
+        let initial_default_subvol_id = data_guard.initial_default_subvol_id;
+        info!("Initial default subvolume ID (running system): {}", initial_default_subvol_id);
+        
+        // Get the current default subvolume ID (for next boot)
+        let current_default_subvol_id = btrfs.subvolume_get_default(&data_guard.rootfs_dir)?;
+        info!("Current default subvolume ID (next boot): {}", current_default_subvol_id);
+
+        // List all deployment subvolumes
+        let deployments = btrfs.list_deployment_subvolumes(&data_guard.deployments_dir)?;
+        info!("Found {} deployment subvolumes", deployments.len());
+
+        let mut cleared_count = 0;
+
+        // Delete all deployments except the protected ones
+        for (name, id, path) in deployments {
+            // CRITICAL: Protect the initial default (currently running system)
+            if id == initial_default_subvol_id {
+                info!(
+                    "Preserving RUNNING deployment: {} (ID: {}) - currently mounted!",
+                    name, id
+                );
+                continue;
+            }
+
+            // Protect the current default (for next boot)
+            if id == current_default_subvol_id {
+                info!(
+                    "Preserving NEXT BOOT deployment: {} (ID: {})",
+                    name, id
+                );
+                continue;
+            }
+
+            info!("Deleting old deployment: {} (ID: {})", name, id);
+            match btrfs.subvolume_delete(&path) {
+                Ok(_) => {
+                    info!("Successfully deleted deployment: {}", name);
+                    cleared_count += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to delete deployment {}: {}", name, e);
+                    // Continue with other deployments even if one fails
+                }
+            }
+        }
+
+        info!("Cleared {} old deployments", cleared_count);
+        Ok(cleared_count)
     }
 
     /// Common method to install an update from a reader
@@ -494,6 +598,19 @@ impl Service {
         while let Some(request) = update_rx.recv().await {
             info!("Processing update request: {:?}", request.source);
 
+            // Step 1: Clear old deployments before installing new ones
+            data.read().await.set_status(UpdateStatus::Clearing).await;
+            match Self::clear_old_deployments(&data, &btrfs).await {
+                Ok(count) => {
+                    info!("Cleared {} old deployments", count);
+                }
+                Err(err) => {
+                    warn!("Failed to clear old deployments: {}", err);
+                    // Continue with installation even if clearing fails
+                }
+            }
+
+            // Step 2: Process the update (download/install)
             let (source_desc, result) = match request.source {
                 UpdateSource::Url(url) => {
                     let desc = url.clone();

@@ -37,13 +37,15 @@ Progress is updated as data flows through the stream:
 ## Progress Values
 
 - **0-100**: Active download/install with known size
-- **-1**: Size unknown or status is Idle/Completed/Failed
+- **-1**: Size unknown or status is Idle/Clearing/Completed/Failed
 
 ## Example Flow
 
 ```
 Status: Idle, Progress: -1
    ↓ (update request received)
+Status: Clearing, Progress: -1
+   ↓ (cleaning old deployments)
 Status: Downloading, Progress: 0
    ↓ (bytes flowing...)
 Status: Downloading, Progress: 25
