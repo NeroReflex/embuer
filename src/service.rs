@@ -2,9 +2,11 @@ use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -25,11 +27,140 @@ pub struct UpdateRequest {
     pub source: UpdateSource,
 }
 
+/// Current status of the update process
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// No update in progress
+    Idle,
+    /// Checking for updates
+    Checking,
+    /// Downloading update (with progress 0-100, or -1 if unknown)
+    Downloading { source: String, progress: i32 },
+    /// Installing update (with progress 0-100, or -1 if unknown)
+    Installing { source: String, progress: i32 },
+    /// Update completed successfully
+    Completed { source: String },
+    /// Update failed
+    Failed { source: String, error: String },
+}
+
+impl UpdateStatus {
+    /// Convert status to a string representation for DBus
+    pub fn as_str(&self) -> &str {
+        match self {
+            UpdateStatus::Idle => "Idle",
+            UpdateStatus::Checking => "Checking",
+            UpdateStatus::Downloading { .. } => "Downloading",
+            UpdateStatus::Installing { .. } => "Installing",
+            UpdateStatus::Completed { .. } => "Completed",
+            UpdateStatus::Failed { .. } => "Failed",
+        }
+    }
+
+    /// Get additional details about the status
+    pub fn details(&self) -> String {
+        match self {
+            UpdateStatus::Idle => String::new(),
+            UpdateStatus::Checking => String::new(),
+            UpdateStatus::Downloading { source, .. } => source.clone(),
+            UpdateStatus::Installing { source, .. } => source.clone(),
+            UpdateStatus::Completed { source } => source.clone(),
+            UpdateStatus::Failed { source, error } => format!("{}: {}", source, error),
+        }
+    }
+
+    /// Get progress percentage (0-100, or -1 if not applicable/unknown)
+    pub fn progress(&self) -> i32 {
+        match self {
+            UpdateStatus::Downloading { progress, .. } => *progress,
+            UpdateStatus::Installing { progress, .. } => *progress,
+            _ => -1,
+        }
+    }
+}
+
+/// A wrapper around AsyncRead that tracks progress
+struct ProgressReader<R> {
+    inner: R,
+    bytes_read: u64,
+    total_size: Option<u64>,
+    status_handle: Arc<RwLock<UpdateStatus>>,
+    source: String,
+    is_installing: bool,
+    last_update: std::time::Instant,
+}
+
+impl<R: AsyncRead + Unpin> ProgressReader<R> {
+    fn new(
+        inner: R,
+        total_size: Option<u64>,
+        status_handle: Arc<RwLock<UpdateStatus>>,
+        source: String,
+        is_installing: bool,
+    ) -> Self {
+        Self {
+            inner,
+            bytes_read: 0,
+            total_size,
+            status_handle,
+            source,
+            is_installing,
+            last_update: std::time::Instant::now(),
+        }
+    }
+
+    fn calculate_progress(&self) -> i32 {
+        self.total_size
+            .filter(|&size| size > 0)
+            .map(|size| ((self.bytes_read as f64 / size as f64) * 100.0) as i32)
+            .unwrap_or(-1)
+    }
+
+    fn should_update(&self) -> bool {
+        self.last_update.elapsed().as_millis() > 100
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+
+        if let Poll::Ready(Ok(())) = &result {
+            let reader = self.get_mut();
+            reader.bytes_read += (buf.filled().len() - before) as u64;
+
+            if reader.should_update() {
+                reader.last_update = std::time::Instant::now();
+                let progress = reader.calculate_progress();
+                let status_handle = reader.status_handle.clone();
+                let source = reader.source.clone();
+                let is_installing = reader.is_installing;
+
+                tokio::spawn(async move {
+                    let mut status = status_handle.write().await;
+                    *status = match is_installing {
+                        true => UpdateStatus::Installing { source, progress },
+                        false => UpdateStatus::Downloading { source, progress },
+                    };
+                });
+            }
+        }
+
+        result
+    }
+}
+
 pub struct ServiceInner {
     pubkey: RsaPublicKey,
     notify: Arc<tokio::sync::Notify>,
     rootfs_dir: std::path::PathBuf,
     deployments_dir: std::path::PathBuf,
+    update_status: Arc<RwLock<UpdateStatus>>,
 }
 
 impl ServiceInner {
@@ -91,6 +222,11 @@ impl ServiceInner {
         // Return the received subvolume name
         subvolume
     }
+
+    /// Set status helper
+    async fn set_status(&self, status: UpdateStatus) {
+        *self.update_status.write().await = status;
+    }
 }
 
 pub struct Service {
@@ -134,12 +270,14 @@ impl Service {
         };
 
         let notify = Arc::new(tokio::sync::Notify::new());
+        let update_status = Arc::new(RwLock::new(UpdateStatus::Idle));
 
         let service_data = Arc::new(RwLock::new(ServiceInner {
             pubkey,
             notify,
             rootfs_dir,
             deployments_dir,
+            update_status,
         }));
 
         let btrfs = Arc::new(btrfs);
@@ -162,7 +300,7 @@ impl Service {
             let update_url = url.to_string();
             let update_tx_clone = update_tx.clone();
             let service_data_clone = service_data.clone();
-            
+
             Some(tokio::spawn(async move {
                 let notify_clone = service_data_clone.read().await.notify.clone();
                 Self::periodic_url_checker(update_url, update_tx_clone, notify_clone).await
@@ -184,6 +322,19 @@ impl Service {
     /// Get a sender to submit update requests
     pub fn update_sender(&self) -> mpsc::Sender<UpdateRequest> {
         self.update_tx.clone()
+    }
+
+    /// Get the current update status
+    pub async fn get_update_status(&self) -> UpdateStatus {
+        let data = self.service_data.read().await;
+        let status = data.update_status.read().await.clone();
+        status
+    }
+
+    /// Get a clone of the update status Arc for monitoring
+    pub async fn update_status_handle(&self) -> Arc<RwLock<UpdateStatus>> {
+        let data = self.service_data.read().await;
+        data.update_status.clone()
     }
 
     pub async fn terminate_update_check(&mut self) {
@@ -226,32 +377,92 @@ impl Service {
             .await
             .receive_btrfs_stream(btrfs, reader)
             .await?;
-        match subvolume {
-            Some(name) => {
-                println!("Received subvolume: {}", name);
-                let subvolume_path = data.read().await.deployments_dir.join(&name);
-                match btrfs.btrfs_subvol_get_id(subvolume_path) {
-                    Ok(subvolid) => {
-                        println!("Created btrfs subvolume with id {subvolid}");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        eprintln!("Error checking if subvolume is a btrfs subvolume: {e}");
-                        Err(ServiceError::IOError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("BTRFS subvolume error: {}", e),
-                        )))
-                    }
-                }
-            }
-            None => {
-                eprintln!("No subvolume name found in btrfs receive output");
-                Err(ServiceError::IOError(std::io::Error::new(
+        let name = subvolume.ok_or_else(|| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No subvolume name found",
+            ))
+        })?;
+
+        println!("Received subvolume: {}", name);
+        let subvolume_path = data.read().await.deployments_dir.join(&name);
+
+        btrfs
+            .btrfs_subvol_get_id(subvolume_path)
+            .map(|id| println!("Created btrfs subvolume with id {}", id))
+            .map_err(|e| {
+                ServiceError::IOError(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    "No subvolume name found",
-                )))
-            }
-        }
+                    format!("BTRFS subvolume error: {}", e),
+                ))
+            })
+    }
+
+    /// Process update from URL
+    async fn process_url_update(
+        data: Arc<RwLock<ServiceInner>>,
+        btrfs: Arc<Btrfs>,
+        url: String,
+    ) -> Result<(), ServiceError> {
+        let client = Client::new();
+        let resp = client.get(&url).send().await.map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(std::io::ErrorKind::Other, e))
+        })?;
+
+        println!("Downloading update from {}", url);
+        let total_size = resp.content_length();
+        total_size.map(|size| println!("Download size: {} bytes", size));
+
+        // Set initial downloading status
+        let status_handle = data.read().await.update_status.clone();
+        *status_handle.write().await = UpdateStatus::Downloading {
+            source: url.clone(),
+            progress: 0,
+        };
+
+        let byte_stream = resp
+            .bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let stream_reader = StreamReader::new(byte_stream);
+
+        let progress_reader = ProgressReader::new(
+            stream_reader,
+            total_size,
+            status_handle.clone(),
+            url.clone(),
+            false,
+        );
+
+        // Transition to installing
+        *status_handle.write().await = UpdateStatus::Installing {
+            source: url,
+            progress: 0,
+        };
+
+        Self::install_update(&data, &btrfs, progress_reader).await
+    }
+
+    /// Process update from file
+    async fn process_file_update(
+        data: Arc<RwLock<ServiceInner>>,
+        btrfs: Arc<Btrfs>,
+        path: std::path::PathBuf,
+    ) -> Result<(), ServiceError> {
+        let path_str = path.display().to_string();
+        let file = File::open(&path).await?;
+
+        println!("Installing update from file: {}", path.display());
+        let total_size = file.metadata().await.ok().map(|m| m.len());
+        total_size.map(|size| println!("File size: {} bytes", size));
+
+        let status_handle = data.read().await.update_status.clone();
+        *status_handle.write().await = UpdateStatus::Installing {
+            source: path_str.clone(),
+            progress: 0,
+        };
+
+        let progress_reader = ProgressReader::new(file, total_size, status_handle, path_str, true);
+        Self::install_update(&data, &btrfs, progress_reader).await
     }
 
     /// Main update request loop that processes all update requests from the channel.
@@ -266,48 +477,41 @@ impl Service {
         while let Some(request) = update_rx.recv().await {
             println!("Processing update request: {:?}", request.source);
 
-            let result = match request.source {
+            let (source_desc, result) = match request.source {
                 UpdateSource::Url(url) => {
-                    // Download from URL
-                    let client = Client::new();
-                    match client.get(&url).send().await {
-                        Ok(resp) => {
-                            println!("Downloading update from {}", url);
-                            let byte_stream = resp
-                                .bytes_stream()
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
-                            let reader = StreamReader::new(byte_stream);
-
-                            Self::install_update(&data, &btrfs, reader).await
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to download from {}: {}", url, err);
-                            Err(ServiceError::IOError(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                err,
-                            )))
-                        }
-                    }
+                    let desc = url.clone();
+                    (
+                        desc,
+                        Self::process_url_update(data.clone(), btrfs.clone(), url).await,
+                    )
                 }
                 UpdateSource::File(path) => {
-                    // Read from file
-                    match File::open(&path).await {
-                        Ok(file) => {
-                            println!("Installing update from file: {}", path.display());
-                            Self::install_update(&data, &btrfs, file).await
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to open file {}: {}", path.display(), err);
-                            Err(ServiceError::IOError(err))
-                        }
+                    let desc = path.display().to_string();
+                    (
+                        desc,
+                        Self::process_file_update(data.clone(), btrfs.clone(), path).await,
+                    )
+                }
+            };
+
+            // Update final status
+            let status = match result {
+                Ok(_) => {
+                    println!("Update installed successfully");
+                    UpdateStatus::Completed {
+                        source: source_desc,
+                    }
+                }
+                Err(ref err) => {
+                    eprintln!("Failed to install update: {}", err);
+                    UpdateStatus::Failed {
+                        source: source_desc,
+                        error: err.to_string(),
                     }
                 }
             };
 
-            match result {
-                Ok(_) => println!("Update installed successfully"),
-                Err(err) => eprintln!("Failed to install update: {}", err),
-            }
+            data.read().await.set_status(status).await;
         }
 
         println!("Update request loop stopped");
