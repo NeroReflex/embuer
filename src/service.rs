@@ -184,50 +184,50 @@ impl Service {
 
         'check: while !update_done {
             tokio::select! {
-                _ = notifications_source.notified() => break 'check,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                    // if an update has already been done just loop waiting for notification
-                    if update_done { continue 'check; }
+                            _ = notifications_source.notified() => break 'check,
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                                // if an update has already been done just loop waiting for notification
+                                if update_done { continue 'check; }
 
-                    match client.get("http://10.0.0.33:8080/factory.btrfs.xz").send().await {
-                        Ok(resp) => {
-                            // reqwest gives Stream<Item = Result<Bytes, reqwest::Error>>
-                            let byte_stream = resp.bytes_stream()
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+                                match client.get("http://10.0.0.33:8080/factory.btrfs.xz").send().await {
+                                    Ok(resp) => {
+                                        // reqwest gives Stream<Item = Result<Bytes, reqwest::Error>>
+                                        let byte_stream = resp.bytes_stream()
+                                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
 
-                            // StreamReader expects Stream<Item = Result<impl Buf, E>>
-                            let reader = StreamReader::new(byte_stream);
+                                        // StreamReader expects Stream<Item = Result<impl Buf, E>>
+                                        let reader = StreamReader::new(byte_stream);
 
-                            let subvolume = data.read().await.receive_btrfs_stream(&btrfs, reader).await.unwrap();
-                            match subvolume {
-                                Some(name) => {
-                                    println!("Received subvolume: {}", name);
-                                    let subvolume_path = data.read().await.deployments_dir.join(name);
-                                    match btrfs.btrfs_subvol_get_id(subvolume_path) {
-                                        Ok(subvolid) => println!("Created btrfs subvolume with id {subvolid}"),
-                                        Err(e) => println!("Error checking if subvolume is a btrfs subvolume: {e}"),
+                                        let subvolume = data.read().await.receive_btrfs_stream(&btrfs, reader).await.unwrap();
+                                        match subvolume {
+                                            Some(name) => {
+                                                println!("Received subvolume: {}", name);
+                                                let subvolume_path = data.read().await.deployments_dir.join(name);
+                                                match btrfs.btrfs_subvol_get_id(subvolume_path) {
+                                                    Ok(subvolid) => println!("Created btrfs subvolume with id {subvolid}"),
+                                                    Err(e) => println!("Error checking if subvolume is a btrfs subvolume: {e}"),
+                                                }
+                                            },
+                                            None => println!("No subvolume name found in btrfs receive output"),
+                                        }
+            /*
+                                        // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
+                                        let archive = Archive::new(reader);
+                                        // Example usage of btrfs inside update_check:
+                                        // (Currently just demonstrate access to version)
+                                        println!("btrfs version in update_check: {}", btrfs.version());
+                                        Self::handle_archive(archive).await;
+            */
+                                        println!("Update applied successfully");
+
+                                        update_done = true;
                                     }
-                                },
-                                None => println!("No subvolume name found in btrfs receive output"),
+                                    Err(err) => {
+                                        eprintln!("request error: {err}");
+                                    }
+                                }
                             }
-/*
-                            // reader implements AsyncRead + AsyncBufRead + Unpin -> usable by tokio_tar
-                            let archive = Archive::new(reader);
-                            // Example usage of btrfs inside update_check:
-                            // (Currently just demonstrate access to version)
-                            println!("btrfs version in update_check: {}", btrfs.version());
-                            Self::handle_archive(archive).await;
-*/
-                            println!("Update applied successfully");
-
-                            update_done = true;
                         }
-                        Err(err) => {
-                            eprintln!("request error: {err}");
-                        }
-                    }
-                }
-            }
         }
     }
 }
