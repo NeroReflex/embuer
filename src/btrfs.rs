@@ -1,4 +1,5 @@
 use crate::ServiceError;
+use log::error;
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -109,7 +110,7 @@ impl Btrfs {
         let pipe_task = tokio::spawn(async move {
             let result = tokio::io::copy(&mut input_stream, &mut btrfs_stdin).await;
             if let Err(e) = result {
-                eprintln!("Error piping data to btrfs receive: {}", e);
+                error!("Error piping data to btrfs receive: {}", e);
             }
             let _ = btrfs_stdin.shutdown().await;
         });

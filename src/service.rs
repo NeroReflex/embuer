@@ -1,5 +1,6 @@
 use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
 use std::pin::Pin;
@@ -197,43 +198,43 @@ impl ServiceInner {
         // Pipe input stream -> xz stdin
         let input_to_xz = tokio::spawn(async move {
             match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
-                Ok(bytes) => println!("Piped {} bytes to xz decompressor", bytes),
+                Ok(bytes) => debug!("Piped {} bytes to xz decompressor", bytes),
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                    eprintln!("⚠️  Broken pipe while sending to xz (xz may have finished early)");
+                    warn!("Broken pipe while sending to xz (xz may have finished early)");
                 }
                 Err(e) => {
-                    eprintln!("❌ Error piping data to xz: {}", e);
+                    error!("Error piping data to xz: {}", e);
                 }
             }
             // Signal EOF to xz
             if let Err(e) = xz_stdin.shutdown().await {
                 if e.kind() != std::io::ErrorKind::BrokenPipe {
-                    eprintln!("⚠️  Error closing xz stdin: {}", e);
+                    warn!("Error closing xz stdin: {}", e);
                 }
             }
         });
 
         // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
-        println!("Starting btrfs receive...");
+        debug!("Starting btrfs receive...");
         let subvolume = btrfs.receive(&self.deployments_dir, xz_stdout).await;
 
         // Wait for piping task
         if let Err(e) = input_to_xz.await {
-            eprintln!("⚠️  Piping task panicked: {}", e);
+            warn!("Piping task panicked: {}", e);
         }
 
         // Wait for xz process to finish
         let xz_status = xz_proc.wait().await?;
         if !xz_status.success() {
             let error_msg = format!("xz decompressor failed with status: {}", xz_status);
-            eprintln!("❌ {}", error_msg);
+            error!("{}", error_msg);
             return Err(ServiceError::IOError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 error_msg,
             )));
         }
 
-        println!("✅ xz decompression completed successfully");
+        debug!("xz decompression completed successfully");
         
         // Return the received subvolume name
         subvolume
@@ -365,16 +366,16 @@ impl Service {
         // Wait for periodic URL checker to finish (if it exists)
         if let Some(checker) = self.periodic_url_checker.take() {
             match checker.await {
-                Ok(_) => println!("Periodic URL checker task terminated successfully"),
-                Err(err) => eprintln!("Error terminating periodic URL checker task: {err}"),
+                Ok(_) => info!("Periodic URL checker task terminated successfully"),
+                Err(err) => error!("Error terminating periodic URL checker task: {err}"),
             }
         }
 
         // Wait for update request loop to finish
         if let Some(request_loop) = self.update_request_loop.take() {
             match request_loop.await {
-                Ok(_) => println!("Update request loop task terminated successfully"),
-                Err(err) => eprintln!("Error terminating update request loop task: {err}"),
+                Ok(_) => info!("Update request loop task terminated successfully"),
+                Err(err) => error!("Error terminating update request loop task: {err}"),
             }
         }
     }
@@ -400,12 +401,12 @@ impl Service {
             ))
         })?;
 
-        println!("Received subvolume: {}", name);
+        info!("Received subvolume: {}", name);
         let subvolume_path = data.read().await.deployments_dir.join(&name);
 
         btrfs
             .btrfs_subvol_get_id(subvolume_path)
-            .map(|id| println!("Created btrfs subvolume with id {}", id))
+            .map(|id| info!("Created btrfs subvolume with id {}", id))
             .map_err(|e| {
                 ServiceError::IOError(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -425,9 +426,9 @@ impl Service {
             ServiceError::IOError(std::io::Error::new(std::io::ErrorKind::Other, e))
         })?;
 
-        println!("Downloading update from {}", url);
+        info!("Downloading update from {}", url);
         let total_size = resp.content_length();
-        total_size.map(|size| println!("Download size: {} bytes", size));
+        total_size.map(|size| info!("Download size: {} bytes", size));
 
         // Set initial downloading status
         let status_handle = data.read().await.update_status.clone();
@@ -467,9 +468,9 @@ impl Service {
         let path_str = path.display().to_string();
         let file = File::open(&path).await?;
 
-        println!("Installing update from file: {}", path.display());
+        info!("Installing update from file: {}", path.display());
         let total_size = file.metadata().await.ok().map(|m| m.len());
-        total_size.map(|size| println!("File size: {} bytes", size));
+        total_size.map(|size| info!("File size: {} bytes", size));
 
         let status_handle = data.read().await.update_status.clone();
         *status_handle.write().await = UpdateStatus::Installing {
@@ -488,10 +489,10 @@ impl Service {
         btrfs: Arc<Btrfs>,
         mut update_rx: mpsc::Receiver<UpdateRequest>,
     ) {
-        println!("Update request loop started");
+        info!("Update request loop started");
 
         while let Some(request) = update_rx.recv().await {
-            println!("Processing update request: {:?}", request.source);
+            info!("Processing update request: {:?}", request.source);
 
             let (source_desc, result) = match request.source {
                 UpdateSource::Url(url) => {
@@ -513,13 +514,13 @@ impl Service {
             // Update final status
             let status = match result {
                 Ok(_) => {
-                    println!("Update installed successfully");
+                    info!("Update installed successfully");
                     UpdateStatus::Completed {
                         source: source_desc,
                     }
                 }
                 Err(ref err) => {
-                    eprintln!("Failed to install update: {}", err);
+                    error!("Failed to install update: {}", err);
                     UpdateStatus::Failed {
                         source: source_desc,
                         error: err.to_string(),
@@ -530,7 +531,7 @@ impl Service {
             data.read().await.set_status(status).await;
         }
 
-        println!("Update request loop stopped");
+        info!("Update request loop stopped");
     }
 
     /// Periodic URL checker task that sends update requests to the channel at regular intervals.
@@ -540,14 +541,14 @@ impl Service {
         update_tx: mpsc::Sender<UpdateRequest>,
         notify: Arc<tokio::sync::Notify>,
     ) {
-        println!("Periodic URL checker started for {}", update_url);
+        info!("Periodic URL checker started for {}", update_url);
 
         let mut update_done = false;
 
         'check: loop {
             tokio::select! {
                 _ = notify.notified() => {
-                    println!("Periodic URL checker received termination signal");
+                    info!("Periodic URL checker received termination signal");
                     break 'check;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
@@ -558,7 +559,7 @@ impl Service {
 
                     // TODO: In a real implementation, you would check if an update is available
                     // before sending the request (e.g., by checking a version endpoint)
-                    println!("Checking for updates at {}", update_url);
+                    info!("Checking for updates at {}", update_url);
 
                     // Send update request to the channel
                     let request = UpdateRequest {
@@ -567,11 +568,11 @@ impl Service {
 
                     match update_tx.send(request).await {
                         Ok(_) => {
-                            println!("Periodic update request sent");
+                            info!("Periodic update request sent");
                             update_done = true;
                         }
                         Err(err) => {
-                            eprintln!("Failed to send periodic update request: {}", err);
+                            error!("Failed to send periodic update request: {}", err);
                             break 'check;
                         }
                     }
@@ -579,6 +580,6 @@ impl Service {
             }
         }
 
-        println!("Periodic URL checker stopped");
+        info!("Periodic URL checker stopped");
     }
 }

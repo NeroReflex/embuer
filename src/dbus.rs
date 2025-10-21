@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use log::{debug, error};
 use tokio::sync::RwLock;
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -41,7 +42,7 @@ impl EmbuerDBus {
                     || current_progress != last_progress;
 
                 if should_emit {
-                    println!(
+                    debug!(
                         "Status update: {} - {} ({}%)",
                         current_status.as_str(),
                         current_status.details(),
@@ -57,7 +58,7 @@ impl EmbuerDBus {
                     )
                     .await
                     {
-                        eprintln!("Failed to emit DBus signal: {}", e);
+                        error!("Failed to emit DBus signal: {}", e);
                     }
 
                     last_status = current_status;
