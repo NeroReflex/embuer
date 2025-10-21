@@ -82,8 +82,13 @@ async fn main() -> Result<(), ServiceError> {
     info!("Application running (status monitor active)");
 
     // Create a signal listener for SIGTERM
-    let mut sigterm =
-        signal(SignalKind::interrupt()).expect("Failed to create SIGTERM signal handler");
+    let mut sigterm = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create SIGTERM signal handler: {}", e);
+            return Err(ServiceError::IOError(e));
+        }
+    };
 
     // Wait for a SIGTERM signal
     sigterm.recv().await;
