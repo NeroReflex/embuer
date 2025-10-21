@@ -3,6 +3,7 @@ pub extern crate zbus;
 pub mod btrfs;
 pub mod config;
 pub mod dbus;
+pub mod ffi;
 pub mod service;
 
 use zbus::Error as ZError;

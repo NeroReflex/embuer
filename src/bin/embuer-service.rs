@@ -75,7 +75,7 @@ async fn main() -> Result<(), ServiceError> {
         .interface::<_, EmbuerDBus>("/org/neroreflex/embuer")
         .await
         .map_err(ServiceError::ZbusError)?;
-    
+
     let signal_emitter = interface_ref.signal_emitter().clone();
     EmbuerDBus::start_status_monitor(service.clone(), signal_emitter).await;
 

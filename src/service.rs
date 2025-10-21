@@ -235,7 +235,7 @@ impl ServiceInner {
         }
 
         debug!("xz decompression completed successfully");
-        
+
         // Return the received subvolume name
         subvolume
     }

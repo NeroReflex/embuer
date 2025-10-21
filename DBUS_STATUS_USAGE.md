@@ -10,7 +10,7 @@ The embuer service now exposes update status via DBus without requiring polling.
 ## DBus Interface
 
 **Service Name:** `org.neroreflex.embuer`  
-**Object Path:** `/org/neroreflex/login_ng_service`  
+**Object Path:** `/org/neroreflex/embuer`  
 **Interface:** `org.neroreflex.embuer1`
 
 ## Update Statuses
@@ -38,7 +38,7 @@ Get the current update status with progress information.
 from pydbus import SystemBus
 
 bus = SystemBus()
-embuer = bus.get("org.neroreflex.embuer", "/org/neroreflex/login_ng_service")
+embuer = bus.get("org.neroreflex.embuer", "/org/neroreflex/embuer")
 
 status, details, progress = embuer.GetUpdateStatus()
 print(f"Status: {status}, Details: {details}, Progress: {progress}%")
@@ -69,7 +69,7 @@ from pydbus import SystemBus
 from gi.repository import GLib
 
 bus = SystemBus()
-embuer = bus.get("org.neroreflex.embuer", "/org/neroreflex/login_ng_service")
+embuer = bus.get("org.neroreflex.embuer", "/org/neroreflex/embuer")
 
 def on_status_changed(status, details, progress):
     print(f"Update status: {status} - {details} ({progress}%)")
@@ -113,13 +113,13 @@ let embuer_dbus = EmbuerDBus::new(service.clone());
 // Serve the DBus interface
 connection
     .object_server()
-    .at("/org/neroreflex/login_ng_service", embuer_dbus)
+    .at("/org/neroreflex/embuer", embuer_dbus)
     .await?;
 
 // Get the signal emitter for this object path
 let signal_emitter = connection
     .object_server()
-    .interface::<_, EmbuerDBus>("/org/neroreflex/login_ng_service")
+    .interface::<_, EmbuerDBus>("/org/neroreflex/embuer")
     .await?;
 
 // Start monitoring status changes and emitting signals
@@ -180,21 +180,21 @@ sudo dbus-monitor --system "type='signal',interface='org.neroreflex.embuer1',mem
 # Trigger an update from a file
 dbus-send --system --print-reply \
   --dest=org.neroreflex.embuer \
-  /org/neroreflex/login_ng_service \
+  /org/neroreflex/embuer \
   org.neroreflex.embuer1.InstallUpdateFromFile \
   string:"/path/to/update.btrfs.xz"
 
 # Trigger an update from a URL
 dbus-send --system --print-reply \
   --dest=org.neroreflex.embuer \
-  /org/neroreflex/login_ng_service \
+  /org/neroreflex/embuer \
   org.neroreflex.embuer1.InstallUpdateFromUrl \
   string:"http://example.com/update.btrfs.xz"
 
 # Get current status
 dbus-send --system --print-reply \
   --dest=org.neroreflex.embuer \
-  /org/neroreflex/login_ng_service \
+  /org/neroreflex/embuer \
   org.neroreflex.embuer1.GetUpdateStatus
 ```
 

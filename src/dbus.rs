@@ -48,7 +48,7 @@ impl EmbuerDBus {
                         current_status.details(),
                         current_progress
                     );
-                    
+
                     // Emit DBus signal with progress
                     if let Err(e) = EmbuerDBus::update_status_changed(
                         &signal_emitter,
@@ -73,7 +73,7 @@ impl EmbuerDBus {
     name = "org.neroreflex.embuer1",
     proxy(
         default_service = "org.neroreflex.embuer",
-        default_path = "/org/neroreflex/login_ng_service"
+        default_path = "/org/neroreflex/embuer"
     )
 )]
 impl EmbuerDBus {

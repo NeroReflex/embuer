@@ -93,7 +93,7 @@ const { systemBus } = require('dbus-next');
 const bus = systemBus();
 const embuer = await bus.getProxyObject(
     'org.neroreflex.embuer',
-    '/org/neroreflex/login_ng_service'
+    '/org/neroreflex/embuer'
 );
 const iface = embuer.getInterface('org.neroreflex.embuer1');
 
