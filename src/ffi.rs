@@ -427,9 +427,9 @@ mod tests {
 
     #[test]
     fn test_client_lifecycle() {
-        let client = embuer_client_new();
+        let client = unsafe { embuer_client_new() };
         assert!(!client.is_null());
-        embuer_client_free(client);
+        unsafe { embuer_client_free(client) };
     }
 
     #[test]
@@ -438,12 +438,14 @@ mod tests {
         let mut details_out = ptr::null_mut();
         let mut progress_out = 0;
 
-        let result = embuer_get_status(
-            ptr::null_mut(),
-            &mut status_out,
-            &mut details_out,
-            &mut progress_out,
-        );
+        let result = unsafe {
+            embuer_get_status(
+                ptr::null_mut(),
+                &mut status_out,
+                &mut details_out,
+                &mut progress_out,
+            )
+        };
 
         assert_eq!(result, EMBUER_ERR_NULL_PTR);
     }
