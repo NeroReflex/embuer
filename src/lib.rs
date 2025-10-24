@@ -4,6 +4,7 @@ pub mod btrfs;
 pub mod config;
 pub mod dbus;
 pub mod ffi;
+pub mod manifest;
 pub mod service;
 
 use zbus::Error as ZError;

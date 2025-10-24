@@ -3,6 +3,7 @@ use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
+use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -183,7 +184,7 @@ pub struct ServiceInner {
     /// The default subvolume ID when the service started.
     /// This is the currently running deployment and must NEVER be deleted,
     /// even if a new update has changed the default subvolume.
-    initial_default_subvol_id: u64,
+    boot_id: u64,
     /// Pending update awaiting confirmation (when auto_install_updates is false)
     pending_update: Arc<RwLock<Option<PendingUpdate>>>,
     /// Channel to send confirmation decisions (true = accept, false = reject)
@@ -321,11 +322,8 @@ impl Service {
         // This is the currently running deployment and must NEVER be deleted,
         // even if subsequent updates change the default subvolume.
         // Deleting the running deployment would crash the system!
-        let initial_default_subvol_id = btrfs.subvolume_get_default(&rootfs_dir)?;
-        info!(
-            "Service starting - running deployment has subvolume ID: {}",
-            initial_default_subvol_id
-        );
+        let boot_id = btrfs.subvolume_get_default(&rootfs_dir)?;
+        info!("Service starting - running deployment has subvolume ID: {boot_id}");
 
         // Create confirmation channel for update approval
         // SECURITY: Minimal capacity of 1 (smallest allowed) limits confirmation buffering
@@ -339,7 +337,7 @@ impl Service {
             rootfs_dir,
             deployments_dir,
             update_status,
-            initial_default_subvol_id,
+            boot_id,
             pending_update,
             confirmation_tx,
             confirmation_rx: Arc::new(RwLock::new(Some(confirmation_rx))),
@@ -497,27 +495,25 @@ impl Service {
         data: &Arc<RwLock<ServiceInner>>,
         btrfs: &Arc<Btrfs>,
     ) -> Result<usize, ServiceError> {
+        info!("Clearing old deployments...");
+
         let data_guard = data.read().await;
 
-        info!("Clearing old deployments...");
+        let rootfs_path = data_guard.rootfs_dir.clone();
+        let deployments_dir = data_guard.deployments_dir.clone();
 
         // CRITICAL: Get the initial default subvolume ID (running deployment)
         // This was recorded when the service started and must NEVER be deleted
-        let initial_default_subvol_id = data_guard.initial_default_subvol_id;
-        info!(
-            "Initial default subvolume ID (running system): {}",
-            initial_default_subvol_id
-        );
+        let boot_id = data_guard.boot_id;
+        drop(data_guard);
+        info!("Initial default subvolume ID (running system): {boot_id}");
 
         // Get the current default subvolume ID (for next boot)
-        let current_default_subvol_id = btrfs.subvolume_get_default(&data_guard.rootfs_dir)?;
-        info!(
-            "Current default subvolume ID (next boot): {}",
-            current_default_subvol_id
-        );
+        let current_id = btrfs.subvolume_get_default(&rootfs_path)?;
+        info!("Current default subvolume ID (next boot): {current_id}");
 
         // List all deployment subvolumes
-        let deployments = btrfs.list_deployment_subvolumes(&data_guard.deployments_dir)?;
+        let deployments = btrfs.list_deployment_subvolumes(&deployments_dir)?;
         info!("Found {} deployment subvolumes", deployments.len());
 
         let mut cleared_count = 0;
@@ -525,34 +521,94 @@ impl Service {
         // Delete all deployments except the protected ones
         for (name, id, path) in deployments {
             // CRITICAL: Protect the initial default (currently running system)
-            if id == initial_default_subvol_id {
-                info!(
-                    "Preserving RUNNING deployment: {} (ID: {}) - currently mounted!",
-                    name, id
-                );
+            if id == boot_id {
+                debug!("Preserving RUNNING deployment {name} (ID: {id}): currently mounted!");
                 continue;
             }
 
             // Protect the current default (for next boot)
-            if id == current_default_subvol_id {
-                info!("Preserving NEXT BOOT deployment: {} (ID: {})", name, id);
+            if id == current_id {
+                debug!("Preserving NEXT BOOT deployment {name} (ID={id})");
                 continue;
             }
 
-            info!("Deleting old deployment: {} (ID: {})", name, id);
+            // in both the currently running system and the new deployment,
+            // the distro is expected to place the manifest at:
+            // /usr/share/embuer/manifest.json
+            let manifet_installed = path
+                .clone()
+                .join("usr")
+                .join("share")
+                .join("embuer")
+                .join("manifest.json");
+
+            if !manifet_installed.exists() || !manifet_installed.is_file() {
+                warn!(
+                    "No manifest found in old deployment at {:?}",
+                    manifet_installed
+                );
+            }
+
+            debug!("Verifying installed manifest at {:?}", manifet_installed);
+            match crate::manifest::Manifest::from_file(&manifet_installed) {
+                Ok(manifest) => {
+                    // If an uninstall script is specified in the manifest run it now
+                    if let Some(uninstall_script) = manifest.uninstall_script() {
+                        info!("Running install script for the new deployment");
+
+                        let script_path = path.join(uninstall_script);
+                        if script_path.exists()
+                            && script_path.is_file()
+                            && script_path
+                                .metadata()
+                                .map(|m| m.permissions().mode() & 0o111 != 0)
+                                .unwrap_or(false)
+                        {
+                            let mut cmd = Command::new(script_path);
+                            cmd.arg(&rootfs_path);
+                            cmd.arg(&deployments_dir);
+                            cmd.arg(&name);
+
+                            let status = cmd.status().await.map_err(|e| {
+                                ServiceError::IOError(std::io::Error::other(format!(
+                                    "Failed to execute install script: {e}"
+                                )))
+                            })?;
+
+                            if !status.success() {
+                                warn!("Install script exited with non-zero status: {}", status);
+                            } else {
+                                info!("Install script completed successfully");
+                            }
+                        } else {
+                            warn!(
+                                "Uninstall script specified in manifest does not exist or cannot be run: {:?}",
+                                script_path
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to read/parse manifest: {err}");
+                }
+            };
+
+            // Regardless of the previous outcome, delete the old deployment
+            info!("Deleting old deployment {name} (ID: {id})");
             match btrfs.subvolume_delete(&path) {
                 Ok(_) => {
-                    info!("Successfully deleted deployment: {}", name);
+                    info!("Successfully deleted deployment {name} (ID={id})");
                     cleared_count += 1;
                 }
                 Err(e) => {
-                    warn!("Failed to delete deployment {}: {}", name, e);
+                    warn!("Failed to delete deployment {name} (ID={id}): {e}");
                     // Continue with other deployments even if one fails
                 }
             }
         }
 
-        info!("Cleared {} old deployments", cleared_count);
+        info!("Cleared {cleared_count} old deployments");
+
         Ok(cleared_count)
     }
 
@@ -574,20 +630,116 @@ impl Service {
             ServiceError::IOError(std::io::Error::other("No subvolume name found"))
         })?;
 
-        info!("Received subvolume: {}", name);
-        let subvolume_path = data.read().await.deployments_dir.join(&name);
+        info!("Received subvolume: {name}");
+        let rootfs_path = data.read().await.rootfs_dir.clone();
+        let deployments_dir = data.read().await.deployments_dir.clone();
+        let subvolume_path = deployments_dir.join(&name);
 
-        let subvol_id = btrfs.btrfs_subvol_get_id(subvolume_path).map_err(|e| {
-            ServiceError::IOError(std::io::Error::other(format!(
-                "BTRFS subvolume error: {}",
-                e
-            )))
-        })?;
+        let subvol_id = btrfs
+            .btrfs_subvol_get_id(subvolume_path.clone())
+            .map_err(|e| {
+                ServiceError::IOError(std::io::Error::other(format!("BTRFS subvolume error: {e}")))
+            })?;
 
-        info!("Installed update as subvolume ID: {}", subvol_id);
+        // in both the currently running system and the new deployment,
+        // the distro is expected to place the manifest at:
+        // /usr/share/embuer/manifest.json
+        let manifet_installed = subvolume_path
+            .clone()
+            .join("usr")
+            .join("share")
+            .join("embuer")
+            .join("manifest.json");
+
+        if !manifet_installed.exists() || !manifet_installed.is_file() {
+            warn!(
+                "No manifest found in installed subvolume at {:?}",
+                manifet_installed
+            );
+
+            // Try to delete the invalid subvolume right away
+            if let Err(e) = btrfs.subvolume_delete(subvolume_path.clone()) {
+                warn!("Failed to delete invalid subvolume {name}: {e}");
+            }
+
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Installed subvolume is missing manifest.json",
+            )));
+        }
+
+        debug!("Verifying installed manifest at {:?}", manifet_installed);
+        let manifest = match crate::manifest::Manifest::from_file(&manifet_installed) {
+            Ok(m) => m,
+            Err(err) => {
+                warn!("Failed to read/parse manifest: {}", err);
+
+                // Try to delete the invalid subvolume right away
+                if let Err(e) = btrfs.subvolume_delete(subvolume_path.clone()) {
+                    warn!("Failed to delete invalid subvolume {name}: {e}");
+                }
+
+                return Err(ServiceError::IOError(std::io::Error::other(
+                    "Installed subvolume has invalid manifest.json",
+                )));
+            }
+        };
+
+        if !manifest.is_readonly() {
+            debug!("Installed deployment is not marked as readonly: setting read-write");
+
+            btrfs.subvolume_set_rw(subvolume_path.clone())?;
+        }
+
+        // If an install script is specified in the manifest run it now
+        if let Some(install_script) = manifest.install_script() {
+            info!("Running install script for the new deployment");
+
+            let script_path = subvolume_path.join(install_script);
+            if !script_path.exists()
+                || !script_path.is_file()
+                || !script_path
+                    .metadata()
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            {
+                warn!(
+                    "Install script specified in manifest does not exist or cannot be run: {:?}",
+                    script_path
+                );
+
+                // Try to delete the invalid subvolume right away
+                if let Err(e) = btrfs.subvolume_delete(subvolume_path.clone()) {
+                    warn!("Failed to delete invalid subvolume {name}: {e}");
+                }
+
+                return Err(ServiceError::IOError(std::io::Error::other(
+                    "Installed subvolume has invalid manifest.json",
+                )));
+            }
+
+            let mut cmd = Command::new(script_path);
+            cmd.arg(&rootfs_path);
+            cmd.arg(&deployments_dir);
+            cmd.arg(&name);
+
+            let status = cmd.status().await.map_err(|e| {
+                ServiceError::IOError(std::io::Error::other(format!(
+                    "Failed to execute install script: {e}"
+                )))
+            })?;
+
+            if !status.success() {
+                warn!("Install script exited with non-zero status: {status}");
+            } else {
+                info!("Install script completed successfully");
+            }
+        }
+        //info!("Installed manifest version: {}", manifest.version);
+
+        info!("Installed deployment {name} (ID={subvol_id})");
 
         // Make the new subvolume the default for next boot
-        btrfs.subvolume_set_default(subvol_id, data.read().await.rootfs_dir.clone())?;
+        btrfs.subvolume_set_default(subvol_id, &rootfs_path)?;
 
         Ok(())
     }
