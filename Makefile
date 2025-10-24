@@ -27,7 +27,8 @@ test:
 # Build the C example
 example: build-release
 	mkdir -p target/examples
-	$(CC) -o target/examples/embuer_example examples/embuer_example.c \
+	$(CC) -O2 \
+		-o target/examples/embuer_example examples/embuer_example.c \
 		-I. \
 		-L./target/release \
 		-lembuer \
@@ -36,7 +37,8 @@ example: build-release
 # Build the status monitor example
 status-monitor: build-release
 	mkdir -p target/examples
-	$(CC) -o target/examples/status_monitor examples/status_monitor.c \
+	$(CC) -O2 \
+		-o target/examples/status_monitor examples/status_monitor.c \
 		-I. \
 		-L./target/release \
 		-lembuer \
