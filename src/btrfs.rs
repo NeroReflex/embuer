@@ -390,11 +390,8 @@ impl Btrfs {
     ) -> Result<u64, ServiceError> {
         let rootfs_ref = rootfs.as_ref();
 
-        let output = self.run_and_get_stdout([
-            "subvolume",
-            "get-default",
-            &rootfs_ref.to_string_lossy(),
-        ])?;
+        let output =
+            self.run_and_get_stdout(["subvolume", "get-default", &rootfs_ref.to_string_lossy()])?;
 
         // Parse output like "ID 256 gen 123 top level 5 path deployments/current"
         // or "ID 5 (FS_TREE)"

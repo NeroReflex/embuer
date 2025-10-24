@@ -146,7 +146,7 @@ impl EmbuerDBus {
     }
 
     /// Confirm or reject the pending update
-    /// 
+    ///
     /// Parameters:
     /// - accepted: true to accept and install, false to reject
     async fn confirm_update(&self, accepted: bool) -> fdo::Result<String> {
@@ -155,7 +155,7 @@ impl EmbuerDBus {
             .confirm_update(accepted)
             .await
             .map_err(|e| fdo::Error::Failed(format!("Failed to confirm update: {}", e)))?;
-        
+
         if accepted {
             Ok("Update accepted, installation will proceed".to_string())
         } else {

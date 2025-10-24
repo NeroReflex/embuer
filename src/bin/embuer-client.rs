@@ -197,11 +197,11 @@ async fn get_pending_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("╠════════════════════════════════════════════════════════════════════════════╣");
     println!("║ CHANGELOG                                                                  ║");
     println!("╠════════════════════════════════════════════════════════════════════════════╣");
-    
+
     for line in changelog.lines() {
         println!("║ {:<74} ║", line);
     }
-    
+
     println!("╠════════════════════════════════════════════════════════════════════════════╣");
     println!("║ Use 'embuer-client accept' to install or 'embuer-client reject' to cancel ║");
     println!("╚════════════════════════════════════════════════════════════════════════════╝");
@@ -214,7 +214,7 @@ async fn confirm_update(accepted: bool) -> Result<(), Box<dyn std::error::Error>
     let proxy = EmbuerDBusProxy::new(&connection).await?;
 
     let result = proxy.confirm_update(accepted).await?;
-    
+
     if accepted {
         println!("✓ {}", result);
     } else {

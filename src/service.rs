@@ -365,7 +365,8 @@ impl Service {
             let btrfs_clone = btrfs.clone();
             let config_clone = config.clone();
             tokio::spawn(async move {
-                Self::update_request_loop(service_data_clone, btrfs_clone, update_rx, config_clone).await
+                Self::update_request_loop(service_data_clone, btrfs_clone, update_rx, config_clone)
+                    .await
             })
         });
 
@@ -423,19 +424,19 @@ impl Service {
     }
 
     /// Confirm or reject the pending update
-    /// 
+    ///
     /// Parameters:
     /// - `accepted`: true to accept and install, false to reject
-    /// 
+    ///
     /// Security: This method validates that:
     /// 1. The service is in AwaitingConfirmation state
     /// 2. There is actually a pending update
-    /// 
+    ///
     /// This prevents race conditions and misuse where confirmations
     /// are sent before an update is actually pending.
     pub async fn confirm_update(&self, accepted: bool) -> Result<(), ServiceError> {
         let data = self.service_data.read().await;
-        
+
         // SECURITY: Validate current status is AwaitingConfirmation
         let current_status = data.update_status.read().await.clone();
         if !matches!(current_status, UpdateStatus::AwaitingConfirmation { .. }) {
@@ -444,7 +445,7 @@ impl Service {
                 "Cannot confirm update: no update is awaiting confirmation",
             )));
         }
-        
+
         // SECURITY: Verify there is actually a pending update
         let has_pending = data.pending_update.read().await.is_some();
         if !has_pending {
@@ -453,15 +454,14 @@ impl Service {
                 "Cannot confirm update: no pending update found",
             )));
         }
-        
+
         // All validations passed, send confirmation
-        data.confirmation_tx
-            .send(accepted)
-            .await
-            .map_err(|_| ServiceError::IOError(std::io::Error::new(
+        data.confirmation_tx.send(accepted).await.map_err(|_| {
+            ServiceError::IOError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Failed to send confirmation",
-            )))
+            ))
+        })
     }
 
     pub async fn terminate_update_check(&mut self) {
@@ -510,17 +510,23 @@ impl Service {
         btrfs: &Arc<Btrfs>,
     ) -> Result<usize, ServiceError> {
         let data_guard = data.read().await;
-        
+
         info!("Clearing old deployments...");
-        
+
         // CRITICAL: Get the initial default subvolume ID (running deployment)
         // This was recorded when the service started and must NEVER be deleted
         let initial_default_subvol_id = data_guard.initial_default_subvol_id;
-        info!("Initial default subvolume ID (running system): {}", initial_default_subvol_id);
-        
+        info!(
+            "Initial default subvolume ID (running system): {}",
+            initial_default_subvol_id
+        );
+
         // Get the current default subvolume ID (for next boot)
         let current_default_subvol_id = btrfs.subvolume_get_default(&data_guard.rootfs_dir)?;
-        info!("Current default subvolume ID (next boot): {}", current_default_subvol_id);
+        info!(
+            "Current default subvolume ID (next boot): {}",
+            current_default_subvol_id
+        );
 
         // List all deployment subvolumes
         let deployments = btrfs.list_deployment_subvolumes(&data_guard.deployments_dir)?;
@@ -541,10 +547,7 @@ impl Service {
 
             // Protect the current default (for next boot)
             if id == current_default_subvol_id {
-                info!(
-                    "Preserving NEXT BOOT deployment: {} (ID: {})",
-                    name, id
-                );
+                info!("Preserving NEXT BOOT deployment: {} (ID: {})", name, id);
                 continue;
             }
 
@@ -589,15 +592,19 @@ impl Service {
         info!("Received subvolume: {}", name);
         let subvolume_path = data.read().await.deployments_dir.join(&name);
 
-        btrfs
-            .btrfs_subvol_get_id(subvolume_path)
-            .map(|id| info!("Created btrfs subvolume with id {}", id))
-            .map_err(|e| {
-                ServiceError::IOError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("BTRFS subvolume error: {}", e),
-                ))
-            })
+        let subvol_id = btrfs.btrfs_subvol_get_id(subvolume_path).map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("BTRFS subvolume error: {}", e),
+            ))
+        })?;
+
+        info!("Installed update as subvolume ID: {}", subvol_id);
+
+        // Make the new subvolume the default for next boot
+        btrfs.subvolume_set_default(subvol_id, data.read().await.rootfs_dir.clone())?;
+
+        Ok(())
     }
 
     /// Process update from URL
@@ -679,7 +686,9 @@ impl Service {
 
         // Take ownership of the confirmation receiver
         let mut confirmation_rx_opt = data.read().await.confirmation_rx.write().await.take();
-        let mut confirmation_rx = confirmation_rx_opt.take().expect("Confirmation receiver should be available");
+        let mut confirmation_rx = confirmation_rx_opt
+            .take()
+            .expect("Confirmation receiver should be available");
 
         while let Some(request) = update_rx.recv().await {
             info!("Processing update request: {:?}", request.source);
@@ -692,7 +701,7 @@ impl Service {
             // Check if we need user confirmation
             if !config.auto_install_updates() {
                 info!("Auto-install disabled, awaiting user confirmation");
-                
+
                 // Generate hardcoded changelog for now (TODO: fetch real changelog)
                 let version = "2.1.0";
                 let changelog = r#"Version 2.1.0 Release Notes
@@ -723,10 +732,13 @@ Breaking Changes:
 
                 // Set pending update and update status
                 *data.read().await.pending_update.write().await = Some(pending);
-                data.read().await.set_status(UpdateStatus::AwaitingConfirmation {
-                    version: version.to_string(),
-                    source: source_desc.clone(),
-                }).await;
+                data.read()
+                    .await
+                    .set_status(UpdateStatus::AwaitingConfirmation {
+                        version: version.to_string(),
+                        source: source_desc.clone(),
+                    })
+                    .await;
 
                 info!("Waiting for user confirmation...");
 
@@ -742,20 +754,26 @@ Breaking Changes:
                         info!("Update rejected by user");
                         // SECURITY: Clear pending update immediately
                         *data.read().await.pending_update.write().await = None;
-                        data.read().await.set_status(UpdateStatus::Failed {
-                            source: source_desc,
-                            error: "Update rejected by user".to_string(),
-                        }).await;
+                        data.read()
+                            .await
+                            .set_status(UpdateStatus::Failed {
+                                source: source_desc,
+                                error: "Update rejected by user".to_string(),
+                            })
+                            .await;
                         continue;
                     }
                     None => {
                         error!("Confirmation channel closed unexpectedly");
                         // SECURITY: Clear pending update on error
                         *data.read().await.pending_update.write().await = None;
-                        data.read().await.set_status(UpdateStatus::Failed {
-                            source: source_desc,
-                            error: "Confirmation channel closed".to_string(),
-                        }).await;
+                        data.read()
+                            .await
+                            .set_status(UpdateStatus::Failed {
+                                source: source_desc,
+                                error: "Confirmation channel closed".to_string(),
+                            })
+                            .await;
                         continue;
                     }
                 }

@@ -232,7 +232,8 @@ pub extern "C" fn embuer_get_pending_update(
     changelog_out: *mut *mut c_char,
     source_out: *mut *mut c_char,
 ) -> c_int {
-    if client.is_null() || version_out.is_null() || changelog_out.is_null() || source_out.is_null() {
+    if client.is_null() || version_out.is_null() || changelog_out.is_null() || source_out.is_null()
+    {
         return EMBUER_ERR_NULL_PTR;
     }
 

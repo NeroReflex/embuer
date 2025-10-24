@@ -1,5 +1,7 @@
 # Makefile for Embuer
 
+CC?=cc
+
 .PHONY: all build build-release clean test install install-header example
 
 # Default target
@@ -25,7 +27,7 @@ test:
 # Build the C example
 example: build-release
 	mkdir -p target/examples
-	gcc -o target/examples/embuer_example examples/embuer_example.c \
+	$(CC) -o target/examples/embuer_example examples/embuer_example.c \
 		-I. \
 		-L./target/release \
 		-lembuer \
@@ -34,7 +36,7 @@ example: build-release
 # Build the status monitor example
 status-monitor: build-release
 	mkdir -p target/examples
-	gcc -o target/examples/status_monitor examples/status_monitor.c \
+	$(CC) -o target/examples/status_monitor examples/status_monitor.c \
 		-I. \
 		-L./target/release \
 		-lembuer \
