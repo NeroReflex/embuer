@@ -806,7 +806,7 @@ impl Service {
             progress: 0,
         };
 
-        let byte_stream = resp.bytes_stream().map_err(|e| std::io::Error::other(e));
+        let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
         let stream_reader = StreamReader::new(byte_stream);
 
         let progress_reader = ProgressReader::new(

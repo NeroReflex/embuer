@@ -16,7 +16,8 @@ pub struct embuer_client_t {
 
 /// Status callback function type
 /// Parameters: status, details, progress, user_data
-pub type StatusCallback = extern "C" fn(*const c_char, *const c_char, c_int, *mut std::ffi::c_void);
+pub type StatusCallback =
+    unsafe extern "C" fn(*const c_char, *const c_char, c_int, *mut std::ffi::c_void);
 
 /// Error codes
 pub const EMBUER_OK: c_int = 0;
@@ -30,7 +31,7 @@ pub const EMBUER_ERR_NO_PENDING_UPDATE: c_int = -6;
 /// Initialize a new Embuer client
 /// Returns a handle to the client or NULL on error
 #[no_mangle]
-pub extern "C" fn embuer_client_new() -> *mut embuer_client_t {
+pub unsafe extern "C" fn embuer_client_new() -> *mut embuer_client_t {
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
         Err(_) => return ptr::null_mut(),
@@ -51,11 +52,9 @@ pub extern "C" fn embuer_client_new() -> *mut embuer_client_t {
 
 /// Free an Embuer client
 #[no_mangle]
-pub extern "C" fn embuer_client_free(client: *mut embuer_client_t) {
+pub unsafe extern "C" fn embuer_client_free(client: *mut embuer_client_t) {
     if !client.is_null() {
-        unsafe {
-            let _ = Box::from_raw(client);
-        }
+        let _ = Box::from_raw(client);
     }
 }
 
@@ -68,7 +67,7 @@ pub extern "C" fn embuer_client_free(client: *mut embuer_client_t) {
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_get_boot_info(
+pub unsafe extern "C" fn embuer_get_boot_info(
     client: *mut embuer_client_t,
     boot_id_out: *mut u64,
     boot_name_out: *mut *mut c_char,
@@ -112,7 +111,7 @@ pub extern "C" fn embuer_get_boot_info(
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_get_status(
+pub unsafe extern "C" fn embuer_get_status(
     client: *mut embuer_client_t,
     status_out: *mut *mut c_char,
     details_out: *mut *mut c_char,
@@ -162,7 +161,7 @@ pub extern "C" fn embuer_get_status(
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_install_from_file(
+pub unsafe extern "C" fn embuer_install_from_file(
     client: *mut embuer_client_t,
     file_path: *const c_char,
     result_out: *mut *mut c_char,
@@ -210,7 +209,7 @@ pub extern "C" fn embuer_install_from_file(
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_install_from_url(
+pub unsafe extern "C" fn embuer_install_from_url(
     client: *mut embuer_client_t,
     url: *const c_char,
     result_out: *mut *mut c_char,
@@ -251,7 +250,7 @@ pub extern "C" fn embuer_install_from_url(
 
 /// Free a string allocated by the library
 #[no_mangle]
-pub extern "C" fn embuer_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn embuer_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe {
             let _ = CString::from_raw(s);
@@ -269,7 +268,7 @@ pub extern "C" fn embuer_free_string(s: *mut c_char) {
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_get_pending_update(
+pub unsafe extern "C" fn embuer_get_pending_update(
     client: *mut embuer_client_t,
     version_out: *mut *mut c_char,
     changelog_out: *mut *mut c_char,
@@ -325,7 +324,7 @@ pub extern "C" fn embuer_get_pending_update(
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_confirm_update(
+pub unsafe extern "C" fn embuer_confirm_update(
     client: *mut embuer_client_t,
     accepted: c_int,
     result_out: *mut *mut c_char,
@@ -369,7 +368,7 @@ pub extern "C" fn embuer_confirm_update(
 ///
 /// Returns: EMBUER_OK on success, error code otherwise
 #[no_mangle]
-pub extern "C" fn embuer_watch_status(
+pub unsafe extern "C" fn embuer_watch_status(
     client: *mut embuer_client_t,
     callback: StatusCallback,
     user_data: *mut std::ffi::c_void,
