@@ -49,16 +49,22 @@ examples: example status-monitor
 
 # Install the library and header (requires root)
 install: build-release install-header
-	install -m 755 target/release/embuer-service $(DESTDIR)/usr/local/bin/
-	install -m 755 target/release/embuer-client $(DESTDIR)/usr/local/bin/
-	install -m 644 target/release/libembuer.so $(DESTDIR)/usr/local/lib/
-	install -m 644 target/release/libembuer.a $(DESTDIR)/usr/local/lib/
-	install -m rootfs/usr/local/lib/systemd/system/embuer.service $(DESTDIR)/usr/local/lib/systemd/system/
-	ldconfig
+	mkdir -p $(DESTDIR)/usr/bin/
+	install -m 755 target/release/embuer-service $(DESTDIR)/usr/bin/
+	install -m 755 target/release/embuer-client $(DESTDIR)/usr/bin/
+	mkdir -p $(DESTDIR)/usr/lib/
+	install -m 644 target/release/libembuer.so $(DESTDIR)/usr/lib/
+	install -m 644 target/release/libembuer.a $(DESTDIR)/usr/lib/
+	mkdir -p $(DESTDIR)/usr/lib/systemd/system/
+	install -m 644 rootfs/usr/lib/systemd/system/embuer.service $(DESTDIR)/usr/lib/systemd/system/
+	mkdir -p $(DESTDIR)/usr/share/dbus-1/system.d/
+	install -m 644 rootfs/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf $(DESTDIR)/usr/share/dbus-1/system.d/
+#	ldconfig
 
 # Install just the header file
 install-header:
-	install -m 644 embuer.h /usr/local/include/
+	mkdir -p $(DESTDIR)/usr/include/
+	install -m 644 embuer.h $(DESTDIR)/usr/include/
 
 # Run the service (requires root)
 run-service: build-release
