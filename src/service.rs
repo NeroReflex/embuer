@@ -595,7 +595,7 @@ impl Service {
                             && script_path.is_file()
                             && script_path
                                 .metadata()
-                                .map(|m| m.permissions().mode() & 0o111 != 0)
+                                .map(|m| m.permissions().mode() & 0o100 != 0)
                                 .unwrap_or(false)
                         {
                             let mut cmd = Command::new(script_path);
@@ -736,7 +736,7 @@ impl Service {
                 || !script_path.is_file()
                 || !script_path
                     .metadata()
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .map(|m| m.permissions().mode() & 0o100 != 0)
                     .unwrap_or(false)
             {
                 warn!(
