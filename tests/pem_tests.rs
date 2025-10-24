@@ -22,7 +22,6 @@ fn pem_loading_and_parsing() {
     // Build config JSON string pointing to the PEM file path
     let json = format!(
         r#"{{
-        "check_for_updates": false,
         "auto_install_updates": false,
         "public_key_pem": "{}"
     }}"#,
@@ -47,7 +46,6 @@ fn pem_loading_and_parsing() {
 #[test]
 fn missing_pem_path_fails() {
     let json = r#"{
-        "check_for_updates": false,
         "auto_install_updates": false
     }"#;
 
@@ -69,7 +67,6 @@ fn invalid_pem_fails() {
 
     let json = format!(
         r#"{{
-        "check_for_updates": false,
         "auto_install_updates": false,
         "public_key_pem": "{}"
     }}"#,
