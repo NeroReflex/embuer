@@ -337,9 +337,9 @@ impl Service {
         );
 
         // Create confirmation channel for update approval
-        // SECURITY: Capacity of 0 prevents buffering of premature confirmations
-        // This ensures confirmations can only be sent when actively waiting
-        let (confirmation_tx, confirmation_rx) = mpsc::channel::<bool>(0);
+        // SECURITY: Minimal capacity of 1 (smallest allowed) limits confirmation buffering
+        // Combined with pending_update state checks, ensures confirmations are only valid when actively waiting
+        let (confirmation_tx, confirmation_rx) = mpsc::channel::<bool>(1);
         let pending_update = Arc::new(RwLock::new(None));
 
         let service_data = Arc::new(RwLock::new(ServiceInner {
@@ -731,7 +731,7 @@ Breaking Changes:
                 info!("Waiting for user confirmation...");
 
                 // SECURITY: Wait for confirmation - this blocks until a valid confirmation is received
-                // The channel has capacity 0, so confirmations cannot be buffered/premature
+                // The channel has minimal capacity (1), combined with pending_update guards to prevent premature confirmations
                 match confirmation_rx.recv().await {
                     Some(true) => {
                         info!("Update accepted by user, proceeding with installation");

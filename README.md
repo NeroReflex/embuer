@@ -74,6 +74,29 @@ Install an update from a URL:
 embuer-client install-url https://example.com/update.tar.gz
 ```
 
+**When AwaitingConfirmation appears:**
+```bash
+# View changelog and details
+embuer-client pending-update
+
+# Accept the update
+embuer-client accept
+
+# OR reject the update
+embuer-client reject
+```
+
+### Manual Testing Scenario
+
+1. Set `auto_install_updates: false` in config
+2. Start the service: `sudo embuer-service`
+3. In another terminal, run: `embuer-client watch`
+4. Trigger an update (via periodic checker or `embuer-client install-url`)
+5. Observe status change to "AwaitingConfirmation"
+6. Run `embuer-client pending-update` to view details
+7. Run `embuer-client accept` to approve
+8. Observe installation progress in watch terminal
+
 ### Using the C Library
 
 Include the header file and link against the library:
