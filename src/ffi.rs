@@ -59,6 +59,49 @@ pub extern "C" fn embuer_client_free(client: *mut embuer_client_t) {
     }
 }
 
+/// Get the boot deployment information
+///
+/// Parameters:
+/// - client: Client handle
+/// - boot_id_out: Pointer to store boot ID
+/// - boot_name_out: Pointer to store boot name string (must be freed with embuer_free_string)
+///
+/// Returns: EMBUER_OK on success, error code otherwise
+#[no_mangle]
+pub extern "C" fn embuer_get_boot_info(
+    client: *mut embuer_client_t,
+    boot_id_out: *mut u64,
+    boot_name_out: *mut *mut c_char,
+) -> c_int {
+    if client.is_null() || boot_id_out.is_null() || boot_name_out.is_null() {
+        return EMBUER_ERR_NULL_PTR;
+    }
+
+    let client = unsafe { &*client };
+
+    let result = client.runtime.block_on(async {
+        let proxy = EmbuerDBusProxy::new(&client.connection).await?;
+        proxy.get_boot_info().await
+    });
+
+    match result {
+        Ok((boot_id, boot_name)) => {
+            let boot_name_c = match CString::new(boot_name) {
+                Ok(s) => s,
+                Err(_) => return EMBUER_ERR_INVALID_STRING,
+            };
+
+            unsafe {
+                *boot_id_out = boot_id;
+                *boot_name_out = boot_name_c.into_raw();
+            }
+
+            EMBUER_OK
+        }
+        Err(_) => EMBUER_ERR_DBUS,
+    }
+}
+
 /// Get the current update status
 ///
 /// Parameters:

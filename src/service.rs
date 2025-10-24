@@ -185,6 +185,9 @@ pub struct ServiceInner {
     /// This is the currently running deployment and must NEVER be deleted,
     /// even if a new update has changed the default subvolume.
     boot_id: u64,
+    /// The deployment name (path inside deployment_dir) of the booted deployment.
+    /// This corresponds to the deployment with subvolume ID matching boot_id.
+    boot_name: String,
     /// Pending update awaiting confirmation (when auto_install_updates is false)
     pending_update: Arc<RwLock<Option<PendingUpdate>>>,
     /// Channel to send confirmation decisions (true = accept, false = reject)
@@ -325,6 +328,21 @@ impl Service {
         let boot_id = btrfs.subvolume_get_default(&rootfs_dir)?;
         info!("Service starting - running deployment has subvolume ID: {boot_id}");
 
+        // Find the deployment name that corresponds to this boot_id
+        let boot_name = {
+            let deployments = btrfs.list_deployment_subvolumes(&deployments_dir)?;
+            deployments
+                .into_iter()
+                .find(|(_, id, _)| *id == boot_id)
+                .map(|(name, _, _)| name)
+                .ok_or_else(|| {
+                    ServiceError::BtrfsError(format!(
+                        "Could not find deployment for running subvolume ID {boot_id}"
+                    ))
+                })?
+        };
+        info!("Service starting - running deployment name: {boot_name}");
+
         // Create confirmation channel for update approval
         // SECURITY: Minimal capacity of 1 (smallest allowed) limits confirmation buffering
         // Combined with pending_update state checks, ensures confirmations are only valid when actively waiting
@@ -338,6 +356,7 @@ impl Service {
             deployments_dir,
             update_status,
             boot_id,
+            boot_name,
             pending_update,
             confirmation_tx,
             confirmation_rx: Arc::new(RwLock::new(Some(confirmation_rx))),
@@ -387,6 +406,20 @@ impl Service {
     /// Get a sender to submit update requests
     pub fn update_sender(&self) -> mpsc::Sender<UpdateRequest> {
         self.update_tx.clone()
+    }
+
+    /// Get the boot deployment subvolume ID
+    /// This is the subvolume ID of the currently running deployment
+    pub async fn get_boot_id(&self) -> u64 {
+        let data = self.service_data.read().await;
+        data.boot_id
+    }
+
+    /// Get the boot deployment name
+    /// This is the deployment directory name (inside deployment_dir) of the currently running deployment
+    pub async fn get_boot_name(&self) -> String {
+        let data = self.service_data.read().await;
+        data.boot_name.clone()
     }
 
     /// Get the current update status
@@ -505,8 +538,9 @@ impl Service {
         // CRITICAL: Get the initial default subvolume ID (running deployment)
         // This was recorded when the service started and must NEVER be deleted
         let boot_id = data_guard.boot_id;
+        let boot_name = data_guard.boot_name.clone();
         drop(data_guard);
-        info!("Initial default subvolume ID (running system): {boot_id}");
+        info!("Initial default subvolume ID (running system): {boot_id} (name: {boot_name})");
 
         // Get the current default subvolume ID (for next boot)
         let current_id = btrfs.subvolume_get_default(&rootfs_path)?;
@@ -522,7 +556,7 @@ impl Service {
         for (name, id, path) in deployments {
             // CRITICAL: Protect the initial default (currently running system)
             if id == boot_id {
-                debug!("Preserving RUNNING deployment {name} (ID: {id}): currently mounted!");
+                debug!("Preserving RUNNING deployment {name} (ID: {id}): currently mounted! (boot_name: {boot_name})");
                 continue;
             }
 
@@ -631,9 +665,12 @@ impl Service {
         })?;
 
         info!("Received subvolume: {name}");
-        let rootfs_path = data.read().await.rootfs_dir.clone();
-        let deployments_dir = data.read().await.deployments_dir.clone();
+        let data_guard = data.read().await;
+        let rootfs_path = data_guard.rootfs_dir.clone();
+        let deployments_dir = data_guard.deployments_dir.clone();
+        let currently_running_name = data_guard.boot_name.clone();
         let subvolume_path = deployments_dir.join(&name);
+        drop(data_guard);
 
         let subvol_id = btrfs
             .btrfs_subvol_get_id(subvolume_path.clone())
@@ -721,6 +758,7 @@ impl Service {
             cmd.arg(&rootfs_path);
             cmd.arg(&deployments_dir);
             cmd.arg(&name);
+            cmd.arg(&currently_running_name);
 
             let status = cmd.status().await.map_err(|e| {
                 ServiceError::IOError(std::io::Error::other(format!(

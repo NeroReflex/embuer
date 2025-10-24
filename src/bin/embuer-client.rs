@@ -1,7 +1,77 @@
+use argh::FromArgs;
 use embuer::dbus::EmbuerDBusProxy;
 use futures_util::StreamExt;
+use owo_colors::OwoColorize;
 use std::process;
 use zbus::Connection;
+
+/// Embuer Client - Control and monitor the Embuer update service
+#[derive(FromArgs)]
+struct EmbuerCli {
+    #[argh(subcommand)]
+    command: SubCommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum SubCommand {
+    Status(StatusCmd),
+    BootInfo(BootInfoCmd),
+    Watch(WatchCmd),
+    InstallFile(InstallFileCmd),
+    InstallUrl(InstallUrlCmd),
+    PendingUpdate(PendingUpdateCmd),
+    Accept(AcceptCmd),
+    Reject(RejectCmd),
+}
+
+/// Get the current update status
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+struct StatusCmd {}
+
+/// Get information about the currently running deployment
+#[derive(FromArgs)]
+#[argh(subcommand, name = "boot-info")]
+struct BootInfoCmd {}
+
+/// Watch for status changes in real-time
+#[derive(FromArgs)]
+#[argh(subcommand, name = "watch")]
+struct WatchCmd {}
+
+/// Install an update from a local file
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install-file")]
+struct InstallFileCmd {
+    /// path to the update file
+    #[argh(positional)]
+    path: String,
+}
+
+/// Install an update from a URL
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install-url")]
+struct InstallUrlCmd {
+    /// URL to download the update from
+    #[argh(positional)]
+    url: String,
+}
+
+/// Show details of pending update awaiting confirmation
+#[derive(FromArgs)]
+#[argh(subcommand, name = "pending-update")]
+struct PendingUpdateCmd {}
+
+/// Accept the pending update and proceed with installation
+#[derive(FromArgs)]
+#[argh(subcommand, name = "accept")]
+struct AcceptCmd {}
+
+/// Reject the pending update
+#[derive(FromArgs)]
+#[argh(subcommand, name = "reject")]
+struct RejectCmd {}
 
 #[tokio::main]
 async fn main() {
@@ -9,103 +79,23 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
+    let cli: EmbuerCli = argh::from_env();
 
-    if args.len() < 2 {
-        print_usage(&args[0]);
+    let result = match cli.command {
+        SubCommand::Status(_) => get_status().await,
+        SubCommand::BootInfo(_) => get_boot_info().await,
+        SubCommand::Watch(_) => watch_status().await,
+        SubCommand::InstallFile(cmd) => install_from_file(&cmd.path).await,
+        SubCommand::InstallUrl(cmd) => install_from_url(&cmd.url).await,
+        SubCommand::PendingUpdate(_) => get_pending_update().await,
+        SubCommand::Accept(_) => confirm_update(true).await,
+        SubCommand::Reject(_) => confirm_update(false).await,
+    };
+
+    if let Err(e) = result {
+        eprintln!("{} {}", "✗".red().bold(), e.to_string().red());
         process::exit(1);
     }
-
-    let command = &args[1];
-
-    match command.as_str() {
-        "status" => {
-            if let Err(e) = get_status().await {
-                eprintln!("Error getting status: {}", e);
-                process::exit(1);
-            }
-        }
-        "watch" => {
-            if let Err(e) = watch_status().await {
-                eprintln!("Error watching status: {}", e);
-                process::exit(1);
-            }
-        }
-        "install-file" => {
-            if args.len() < 3 {
-                eprintln!("Error: install-file requires a file path");
-                print_usage(&args[0]);
-                process::exit(1);
-            }
-            if let Err(e) = install_from_file(&args[2]).await {
-                eprintln!("Error installing update: {}", e);
-                process::exit(1);
-            }
-        }
-        "install-url" => {
-            if args.len() < 3 {
-                eprintln!("Error: install-url requires a URL");
-                print_usage(&args[0]);
-                process::exit(1);
-            }
-            if let Err(e) = install_from_url(&args[2]).await {
-                eprintln!("Error installing update: {}", e);
-                process::exit(1);
-            }
-        }
-        "pending-update" => {
-            if let Err(e) = get_pending_update().await {
-                eprintln!("Error getting pending update: {}", e);
-                process::exit(1);
-            }
-        }
-        "accept" => {
-            if let Err(e) = confirm_update(true).await {
-                eprintln!("Error accepting update: {}", e);
-                process::exit(1);
-            }
-        }
-        "reject" => {
-            if let Err(e) = confirm_update(false).await {
-                eprintln!("Error rejecting update: {}", e);
-                process::exit(1);
-            }
-        }
-        "help" | "--help" | "-h" => {
-            print_usage(&args[0]);
-        }
-        _ => {
-            eprintln!("Error: Unknown command '{}'", command);
-            print_usage(&args[0]);
-            process::exit(1);
-        }
-    }
-}
-
-fn print_usage(program_name: &str) {
-    println!("Embuer Client - Control and monitor the Embuer update service");
-    println!();
-    println!("Usage: {} <command> [arguments]", program_name);
-    println!();
-    println!("Commands:");
-    println!("  status              Get the current update status");
-    println!("  watch               Watch for status changes in real-time");
-    println!("  install-file <path> Install an update from a local file");
-    println!("  install-url <url>   Install an update from a URL");
-    println!("  pending-update      Show details of pending update awaiting confirmation");
-    println!("  accept              Accept the pending update and proceed with installation");
-    println!("  reject              Reject the pending update");
-    println!("  help                Show this help message");
-    println!();
-    println!("Examples:");
-    println!("  {} status", program_name);
-    println!("  {} install-file /path/to/update.tar.gz", program_name);
-    println!(
-        "  {} install-url https://example.com/update.tar.gz",
-        program_name
-    );
-    println!("  {} pending-update", program_name);
-    println!("  {} accept", program_name);
 }
 
 async fn get_connection() -> Result<Connection, Box<dyn std::error::Error>> {
@@ -119,13 +109,66 @@ async fn get_status() -> Result<(), Box<dyn std::error::Error>> {
 
     let (status, details, progress) = proxy.get_update_status().await?;
 
-    println!("Status: {}", status);
-    println!("Details: {}", details);
-    if progress >= 0 {
-        println!("Progress: {}%", progress);
-    } else {
-        println!("Progress: N/A");
+    println!(
+        "{} {}",
+        "📊".bright_cyan(),
+        "Update Status".bright_white().bold()
+    );
+    println!();
+
+    let status_colored = match status.as_str() {
+        "Idle" => status.dimmed().to_string(),
+        "Checking" => status.bright_blue().to_string(),
+        "Clearing" => status.bright_yellow().to_string(),
+        "Downloading" => status.bright_cyan().to_string(),
+        "Installing" => status.bright_magenta().to_string(),
+        "AwaitingConfirmation" => status.bright_yellow().bold().to_string(),
+        "Completed" => status.bright_green().bold().to_string(),
+        "Failed" => status.bright_red().bold().to_string(),
+        _ => status.white().to_string(),
+    };
+
+    println!("  {} {}", "Status:".bright_white(), status_colored);
+
+    if !details.is_empty() {
+        println!("  {} {}", "Details:".bright_white(), details.cyan());
     }
+
+    if progress >= 0 {
+        let progress_bar = create_progress_bar(progress);
+        println!(
+            "  {} {}% {}",
+            "Progress:".bright_white(),
+            progress.to_string().bright_green(),
+            progress_bar
+        );
+    }
+
+    Ok(())
+}
+
+async fn get_boot_info() -> Result<(), Box<dyn std::error::Error>> {
+    let connection = get_connection().await?;
+    let proxy = EmbuerDBusProxy::new(&connection).await?;
+
+    let (boot_id, boot_name) = proxy.get_boot_info().await?;
+
+    println!(
+        "{} {}",
+        "🚀".bright_magenta(),
+        "Boot Deployment Information".bright_white().bold()
+    );
+    println!();
+    println!(
+        "  {} {}",
+        "Deployment Name:".bright_white(),
+        boot_name.bright_cyan().bold()
+    );
+    println!(
+        "  {} {}",
+        "Subvolume ID:".bright_white(),
+        boot_id.to_string().bright_green()
+    );
 
     Ok(())
 }
@@ -134,7 +177,12 @@ async fn watch_status() -> Result<(), Box<dyn std::error::Error>> {
     let connection = get_connection().await?;
     let proxy = EmbuerDBusProxy::new(&connection).await?;
 
-    println!("Watching for status updates... (Ctrl+C to exit)");
+    println!(
+        "{} {}",
+        "👁️".bright_yellow(),
+        "Watching for status updates...".bright_white().bold()
+    );
+    println!("{}", "(Press Ctrl+C to exit)".dimmed());
     println!();
 
     // Get initial status
@@ -153,22 +201,69 @@ async fn watch_status() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_status_line(status: &str, details: &str, progress: i32) {
-    let timestamp = chrono::Local::now().format("%H:%M:%S");
+    let timestamp_str = chrono::Local::now().format("%H:%M:%S").to_string();
+    let timestamp = timestamp_str.dimmed();
+
+    let (emoji, status_colored) = match status {
+        "Idle" => ("💤", status.dimmed().to_string()),
+        "Checking" => ("🔍", status.bright_blue().to_string()),
+        "Clearing" => ("🧹", status.bright_yellow().to_string()),
+        "Downloading" => ("⬇️", status.bright_cyan().to_string()),
+        "Installing" => ("⚙️", status.bright_magenta().to_string()),
+        "AwaitingConfirmation" => ("⏸️", status.bright_yellow().bold().to_string()),
+        "Completed" => ("✅", status.bright_green().bold().to_string()),
+        "Failed" => ("❌", status.bright_red().bold().to_string()),
+        _ => ("ℹ️", status.white().to_string()),
+    };
+
     if progress >= 0 {
-        println!("[{}] {} - {} ({}%)", timestamp, status, details, progress);
+        let progress_bar = create_progress_bar(progress);
+        println!(
+            "[{}] {} {} {} {}% {}",
+            timestamp,
+            emoji,
+            status_colored,
+            details.cyan(),
+            progress.to_string().bright_green(),
+            progress_bar
+        );
     } else {
-        println!("[{}] {} - {}", timestamp, status, details);
+        println!(
+            "[{}] {} {} {}",
+            timestamp,
+            emoji,
+            status_colored,
+            details.cyan()
+        );
     }
+}
+
+fn create_progress_bar(progress: i32) -> String {
+    let filled = (progress / 5) as usize;
+    let empty = 20 - filled;
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled).bright_green(),
+        "░".repeat(empty).dimmed()
+    );
+    format!("[{}]", bar)
 }
 
 async fn install_from_file(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let connection = get_connection().await?;
     let proxy = EmbuerDBusProxy::new(&connection).await?;
 
+    println!(
+        "{} Installing update from file: {}",
+        "📦".bright_cyan(),
+        file_path.bright_white().bold()
+    );
+
     let result = proxy
         .install_update_from_file(file_path.to_string())
         .await?;
-    println!("{}", result);
+
+    println!("{} {}", "✓".bright_green().bold(), result.bright_white());
 
     Ok(())
 }
@@ -177,8 +272,15 @@ async fn install_from_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let connection = get_connection().await?;
     let proxy = EmbuerDBusProxy::new(&connection).await?;
 
+    println!(
+        "{} Downloading and installing update from: {}",
+        "🌐".bright_cyan(),
+        url.bright_white().bold()
+    );
+
     let result = proxy.install_update_from_url(url.to_string()).await?;
-    println!("{}", result);
+
+    println!("{} {}", "✓".bright_green().bold(), result.bright_white());
 
     Ok(())
 }
@@ -189,22 +291,80 @@ async fn get_pending_update() -> Result<(), Box<dyn std::error::Error>> {
 
     let (version, changelog, source) = proxy.get_pending_update().await?;
 
-    println!("╔════════════════════════════════════════════════════════════════════════════╗");
-    println!("║                          PENDING UPDATE                                    ║");
-    println!("╠════════════════════════════════════════════════════════════════════════════╣");
-    println!("║ Version: {:<66} ║", version);
-    println!("║ Source:  {:<66} ║", source);
-    println!("╠════════════════════════════════════════════════════════════════════════════╣");
-    println!("║ CHANGELOG                                                                  ║");
-    println!("╠════════════════════════════════════════════════════════════════════════════╣");
+    let border_top =
+        "╔════════════════════════════════════════════════════════════════════════════╗";
+    let border_mid =
+        "╠════════════════════════════════════════════════════════════════════════════╣";
+    let border_bot =
+        "╚════════════════════════════════════════════════════════════════════════════╝";
+    let side = "║";
+
+    println!("{}", border_top.bright_cyan());
+    println!(
+        "{} {} {:<66} {}",
+        side.bright_cyan(),
+        "📦 PENDING UPDATE".bright_yellow().bold(),
+        "",
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
+    println!(
+        "{} {} {:<57} {}",
+        side.bright_cyan(),
+        "Version:".bright_white().bold(),
+        version.bright_green(),
+        side.bright_cyan()
+    );
+    println!(
+        "{} {} {:<58} {}",
+        side.bright_cyan(),
+        "Source:".bright_white().bold(),
+        source.cyan(),
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
+    println!(
+        "{} {} {:<66} {}",
+        side.bright_cyan(),
+        "📝 CHANGELOG".bright_white().bold(),
+        "",
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
 
     for line in changelog.lines() {
-        println!("║ {:<74} ║", line);
+        let formatted_line = if line.starts_with("New Features:")
+            || line.starts_with("Bug Fixes:")
+            || line.starts_with("Performance:")
+            || line.starts_with("Breaking Changes:")
+        {
+            line.bright_yellow().bold().to_string()
+        } else if line.starts_with("- ") {
+            format!("  {}", line.bright_white())
+        } else {
+            line.white().to_string()
+        };
+        println!(
+            "{} {:<74} {}",
+            side.bright_cyan(),
+            formatted_line,
+            side.bright_cyan()
+        );
     }
 
-    println!("╠════════════════════════════════════════════════════════════════════════════╣");
-    println!("║ Use 'embuer-client accept' to install or 'embuer-client reject' to cancel ║");
-    println!("╚════════════════════════════════════════════════════════════════════════════╝");
+    println!("{}", border_mid.bright_cyan());
+    println!(
+        "{} {} {:<41} {}",
+        side.bright_cyan(),
+        "Use".dimmed(),
+        format!(
+            "{} to install or {} to cancel",
+            "embuer-client accept".bright_green(),
+            "embuer-client reject".bright_red()
+        ),
+        side.bright_cyan()
+    );
+    println!("{}", border_bot.bright_cyan());
 
     Ok(())
 }
@@ -216,9 +376,11 @@ async fn confirm_update(accepted: bool) -> Result<(), Box<dyn std::error::Error>
     let result = proxy.confirm_update(accepted).await?;
 
     if accepted {
-        println!("✓ {}", result);
+        println!("{} {}", "✅".bright_green(), result.bright_green().bold());
+        println!("{}", "Installation will proceed...".bright_white());
     } else {
-        println!("✗ {}", result);
+        println!("{} {}", "❌".bright_red(), result.bright_red().bold());
+        println!("{}", "Update has been rejected.".bright_white());
     }
 
     Ok(())

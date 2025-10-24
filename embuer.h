@@ -104,6 +104,27 @@ embuer_client_t* embuer_client_new(void);
 void embuer_client_free(embuer_client_t* client);
 
 /**
+ * Get the boot deployment information
+ * 
+ * This returns both the subvolume ID and deployment name of the currently 
+ * running deployment.
+ * 
+ * Parameters:
+ * - client: Client handle
+ * - boot_id_out: Pointer to receive boot ID
+ * - boot_name_out: Pointer to receive boot name string (must be freed with embuer_free_string)
+ * 
+ * Returns:
+ * - EMBUER_OK on success
+ * - Error code on failure
+ */
+int embuer_get_boot_info(
+    embuer_client_t* client,
+    uint64_t* boot_id_out,
+    char** boot_name_out
+);
+
+/**
  * Get the current update status
  * 
  * Parameters:

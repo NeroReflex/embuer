@@ -132,6 +132,13 @@ impl EmbuerDBus {
         ))
     }
 
+    /// Get the boot deployment information
+    /// Returns: The subvolume ID and name of the currently running deployment
+    async fn get_boot_info(&self) -> fdo::Result<(u64, String)> {
+        let service = self.service.read().await;
+        Ok((service.get_boot_id().await, service.get_boot_name().await))
+    }
+
     /// Get the pending update awaiting confirmation
     /// Returns: (version: String, changelog: String, source: String)
     /// Returns an error if no update is pending
