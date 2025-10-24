@@ -49,10 +49,11 @@ examples: example status-monitor
 
 # Install the library and header (requires root)
 install: build-release install-header
-	install -m 755 target/release/embuer-service /usr/local/bin/
-	install -m 755 target/release/embuer-client /usr/local/bin/
-	install -m 644 target/release/libembuer.so /usr/local/lib/
-	install -m 644 target/release/libembuer.a /usr/local/lib/
+	install -m 755 target/release/embuer-service $(DESTDIR)/usr/local/bin/
+	install -m 755 target/release/embuer-client $(DESTDIR)/usr/local/bin/
+	install -m 644 target/release/libembuer.so $(DESTDIR)/usr/local/lib/
+	install -m 644 target/release/libembuer.a $(DESTDIR)/usr/local/lib/
+	install -m rootfs/usr/local/lib/systemd/system/embuer.service $(DESTDIR)/usr/local/lib/systemd/system/
 	ldconfig
 
 # Install just the header file
