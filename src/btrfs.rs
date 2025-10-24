@@ -93,15 +93,13 @@ impl Btrfs {
             .map_err(ServiceError::IOError)?;
 
         let mut btrfs_stdin = btrfs_proc.stdin.take().ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            ServiceError::IOError(std::io::Error::other(
                 "Failed to open stdin for btrfs receive",
             ))
         })?;
 
         let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            ServiceError::IOError(std::io::Error::other(
                 "Failed to open stderr for btrfs receive",
             ))
         })?;
@@ -136,18 +134,16 @@ impl Btrfs {
         // Wait for btrfs receive to finish
         let btrfs_status = btrfs_proc.wait().await?;
         if !btrfs_status.success() {
-            return Err(ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("btrfs receive failed with status: {}", btrfs_status),
-            )));
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "btrfs receive failed with status: {btrfs_status}",
+            ))));
         }
 
         // Get the parsed subvolume name
         let subvolume = stderr_task.await.map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read btrfs receive output: {}", e),
-            ))
+            ServiceError::IOError(std::io::Error::other(format!(
+                "Failed to read btrfs receive output: {e}",
+            )))
         })?;
 
         Ok(subvolume)
@@ -173,10 +169,10 @@ impl Btrfs {
 
         // Check if the filesystem type is btrfs
         let fs_stat = statfs(path_ref).map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to get filesystem info for {:?}: {}", path_ref, e),
-            ))
+            ServiceError::IOError(std::io::Error::other(format!(
+                "Failed to get filesystem info for {:?}: {}",
+                path_ref, e
+            )))
         })?;
 
         if fs_stat.filesystem_type().0 != BTRFS_SUPER_MAGIC {

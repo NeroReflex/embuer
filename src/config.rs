@@ -53,7 +53,7 @@ impl Config {
         let s = self
             .rootfs_dir
             .as_ref()
-            .map_or_else(|| Err(ServiceError::MissingRootfsDir), |a| Ok(a))?;
+            .map_or_else(|| Err(ServiceError::MissingRootfsDir), Ok)?;
 
         let p = std::path::PathBuf::from(s);
 

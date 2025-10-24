@@ -209,17 +209,11 @@ impl ServiceInner {
             .map_err(ServiceError::IOError)?;
 
         let mut xz_stdin = xz_proc.stdin.take().ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to open stdin for xz",
-            ))
+            ServiceError::IOError(std::io::Error::other("Failed to open stdin for xz"))
         })?;
 
         let xz_stdout = xz_proc.stdout.take().ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to open stdout for xz",
-            ))
+            ServiceError::IOError(std::io::Error::other("Failed to open stdout for xz"))
         })?;
 
         // Pipe input stream -> xz stdin
@@ -255,10 +249,7 @@ impl ServiceInner {
         if !xz_status.success() {
             let error_msg = format!("xz decompressor failed with status: {}", xz_status);
             error!("{}", error_msg);
-            return Err(ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                error_msg,
-            )));
+            return Err(ServiceError::IOError(std::io::Error::other(error_msg)));
         }
 
         debug!("xz decompression completed successfully");
@@ -457,10 +448,7 @@ impl Service {
 
         // All validations passed, send confirmation
         data.confirmation_tx.send(accepted).await.map_err(|_| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to send confirmation",
-            ))
+            ServiceError::IOError(std::io::Error::other("Failed to send confirmation"))
         })
     }
 
@@ -583,20 +571,17 @@ impl Service {
             .receive_btrfs_stream(btrfs, reader)
             .await?;
         let name = subvolume.ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No subvolume name found",
-            ))
+            ServiceError::IOError(std::io::Error::other("No subvolume name found"))
         })?;
 
         info!("Received subvolume: {}", name);
         let subvolume_path = data.read().await.deployments_dir.join(&name);
 
         let subvol_id = btrfs.btrfs_subvol_get_id(subvolume_path).map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("BTRFS subvolume error: {}", e),
-            ))
+            ServiceError::IOError(std::io::Error::other(format!(
+                "BTRFS subvolume error: {}",
+                e
+            )))
         })?;
 
         info!("Installed update as subvolume ID: {}", subvol_id);
@@ -614,9 +599,11 @@ impl Service {
         url: String,
     ) -> Result<(), ServiceError> {
         let client = Client::new();
-        let resp = client.get(&url).send().await.map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(std::io::ErrorKind::Other, e))
-        })?;
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ServiceError::IOError(std::io::Error::other(e)))?;
 
         info!("Downloading update from {}", url);
         let total_size = resp.content_length();
@@ -629,9 +616,7 @@ impl Service {
             progress: 0,
         };
 
-        let byte_stream = resp
-            .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let byte_stream = resp.bytes_stream().map_err(|e| std::io::Error::other(e));
         let stream_reader = StreamReader::new(byte_stream);
 
         let progress_reader = ProgressReader::new(
