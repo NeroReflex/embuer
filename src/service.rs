@@ -3,6 +3,7 @@ use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
+use sha2::{Digest, Sha512};
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -92,6 +93,71 @@ impl UpdateStatus {
         }
     }
 }
+
+/// A wrapper around AsyncRead that computes SHA512 hash incrementally
+/// The hash result is stored in an Arc for retrieval after streaming completes
+pub struct HashingReader<R> {
+    inner: R,
+    hasher: Sha512,
+    hash_result: Arc<RwLock<Option<String>>>,
+}
+
+impl<R: AsyncRead + Unpin> HashingReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha512::new(),
+            hash_result: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn hash_result(&self) -> Arc<RwLock<Option<String>>> {
+        self.hash_result.clone()
+    }
+
+    fn finalize_hash(&mut self) {
+        let hash = std::mem::replace(&mut self.hasher, Sha512::new()).finalize();
+        let hex_hash = hex::encode(hash);
+        if let Ok(mut result) = self.hash_result.try_write() {
+            *result = Some(hex_hash);
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+
+        if let Poll::Ready(Ok(())) = &result {
+            // Update hasher with the newly read data
+            let newly_read = &buf.filled()[before..];
+            if !newly_read.is_empty() {
+                self.hasher.update(newly_read);
+            }
+            
+            // Check if we've reached EOF (no new data and buffer is at capacity)
+            if newly_read.is_empty() && buf.remaining() == 0 {
+                // Finalize the hash when stream ends
+                self.finalize_hash();
+            }
+        }
+
+        result
+    }
+}
+
+impl<R> std::fmt::Debug for HashingReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HashingReader")
+    }
+}
+
+impl<R> Unpin for HashingReader<R> {}
 
 /// A wrapper around AsyncRead that tracks progress
 struct ProgressReader<R> {
@@ -676,6 +742,7 @@ impl Service {
         data: &Arc<RwLock<ServiceInner>>,
         btrfs: &Arc<Btrfs>,
         reader: R,
+        hash_arc: Arc<RwLock<Option<String>>>,
     ) -> Result<(), ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -801,6 +868,13 @@ impl Service {
 
         info!("Installed deployment {name} (ID={subvol_id})");
 
+        // Extract and print the SHA512 hash computed during streaming
+        if let Some(hash) = hash_arc.read().await.as_ref() {
+            info!("update.btrfs.xz SHA512: {}", hash);
+        } else {
+            debug!("update.btrfs.xz SHA512: (not yet available)");
+        }
+
         // Make the new subvolume the default for next boot
         btrfs.subvolume_set_default(subvol_id, &rootfs_path)?;
 
@@ -813,10 +887,12 @@ impl Service {
     /// Instead, the tar Entry is returned as a streaming AsyncRead that
     /// will be piped directly through xz decompression to btrfs receive.
     /// Only the CHANGELOG (small text file) is read into memory.
+    /// 
+    /// Returns: (changelog, update_stream, hash_arc)
     async fn extract_url_update_contents(
         url: String,
         status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>), ServiceError> {
+    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>, Arc<RwLock<Option<String>>>), ServiceError> {
         let client = Client::new();
         let resp = client
             .get(&url)
@@ -900,29 +976,36 @@ impl Service {
             }
         }
 
-        let mut update_stream = update_stream.ok_or_else(|| {
+        let update_stream = update_stream.ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other(
                 "update.btrfs.xz not found in archive",
             ))
         })?;
 
-        // Wrap the stream in a ProgressReader to track progress relative to update.btrfs.xz size
-        if let Some(size) = update_size {
+        // Wrap the stream with HashingReader to compute SHA512 while streaming
+        info!("Starting SHA512 computation for update.btrfs.xz");
+        let hashing_reader = HashingReader::new(update_stream);
+        let hash_arc = hashing_reader.hash_result();
+        
+        // Wrap with ProgressReader if we have a size
+        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size {
             info!(
                 "Wrapping update stream with progress tracking for {} bytes",
                 size
             );
             let progress_reader = ProgressReader::new(
-                update_stream,
+                Box::pin(hashing_reader),
                 Some(size),
                 status_handle.clone(),
                 url.clone(),
                 true, // This is installation phase
             );
-            update_stream = Box::pin(progress_reader);
-        }
+            Box::pin(progress_reader)
+        } else {
+            Box::pin(hashing_reader)
+        };
 
-        Ok((changelog_content, update_stream))
+        Ok((changelog_content, wrapped_stream, hash_arc))
     }
 
     /// Process update from URL
@@ -934,6 +1017,7 @@ impl Service {
         btrfs: Arc<Btrfs>,
         url: String,
         update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
+        hash_arc: Arc<RwLock<Option<String>>>,
     ) -> Result<(), ServiceError> {
         let status_handle = data.read().await.update_status.clone();
 
@@ -945,7 +1029,8 @@ impl Service {
 
         // CRITICAL: Stream update.btrfs.xz directly through pipes without touching disk
         // The stream goes: tar Entry -> xz -d -> btrfs receive (all in memory/pipes)
-        Self::install_update(&data, &btrfs, update_stream).await
+        // Note: SHA512 hash is computed during streaming inside HashingReader
+        Self::install_update(&data, &btrfs, update_stream, hash_arc).await
     }
 
     /// Extract changelog and update stream from file
@@ -957,7 +1042,7 @@ impl Service {
     async fn extract_file_update_contents(
         path: std::path::PathBuf,
         status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>), ServiceError> {
+    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>, Arc<RwLock<Option<String>>>), ServiceError> {
         let file = File::open(&path).await?;
 
         info!("Opening update archive from file: {}", path.display());
@@ -1014,23 +1099,30 @@ impl Service {
             ))
         })?;
 
-        // Wrap the stream in a ProgressReader to track progress relative to update.btrfs.xz size
-        if let Some(size) = update_size {
+        // Wrap the stream with HashingReader to compute SHA512 while streaming
+        info!("Starting SHA512 computation for update.btrfs.xz");
+        let hashing_reader = HashingReader::new(update_stream);
+        let hash_arc = hashing_reader.hash_result();
+        
+        // Wrap with ProgressReader if we have a size
+        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size {
             info!(
                 "Wrapping update stream with progress tracking for {} bytes",
                 size
             );
             let progress_reader = ProgressReader::new(
-                update_stream,
+                Box::pin(hashing_reader),
                 Some(size),
                 status_handle,
                 path.display().to_string(),
                 true, // This is installation phase
             );
-            update_stream = Box::pin(progress_reader);
-        }
+            Box::pin(progress_reader)
+        } else {
+            Box::pin(hashing_reader)
+        };
 
-        Ok((changelog_content, update_stream))
+        Ok((changelog_content, wrapped_stream, hash_arc))
     }
 
     /// Process update from file
@@ -1042,6 +1134,7 @@ impl Service {
         btrfs: Arc<Btrfs>,
         path: std::path::PathBuf,
         update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
+        hash_arc: Arc<RwLock<Option<String>>>,
     ) -> Result<(), ServiceError> {
         let path_str = path.display().to_string();
         let status_handle = data.read().await.update_status.clone();
@@ -1053,7 +1146,8 @@ impl Service {
 
         // CRITICAL: Stream update.btrfs.xz directly through pipes without touching disk
         // The stream goes: tar Entry -> xz -d -> btrfs receive (all in memory/pipes)
-        Self::install_update(&data, &btrfs, update_stream).await
+        // Note: SHA512 hash is computed during streaming inside HashingReader
+        Self::install_update(&data, &btrfs, update_stream, hash_arc).await
     }
 
     /// Main update request loop that processes all update requests from the channel.
@@ -1084,9 +1178,9 @@ impl Service {
             // This reads the tar archive (CHANGELOG must come before update.btrfs.xz)
             info!("Extracting archive contents...");
             let status_handle = data.read().await.update_status.clone();
-            let (changelog, update_stream, version) = match request.source.clone() {
+            let (changelog, update_stream, version, hash_arc) = match request.source.clone() {
                 UpdateSource::Url(url) => {
-                    let (changelog_content, update_stream) =
+                    let (changelog_content, update_stream, hash_arc) =
                         match Self::extract_url_update_contents(url, status_handle).await {
                             Ok(result) => result,
                             Err(ServiceError::NoUpdateAvailable) => {
@@ -1112,10 +1206,10 @@ impl Service {
                         };
                     // Extract version from changelog (first line usually has version info)
                     let version = extract_version_from_changelog(&changelog_content);
-                    (changelog_content, update_stream, version)
+                    (changelog_content, update_stream, version, hash_arc)
                 }
                 UpdateSource::File(path) => {
-                    let (changelog_content, update_stream) =
+                    let (changelog_content, update_stream, hash_arc) =
                         match Self::extract_file_update_contents(
                             path.clone(),
                             status_handle.clone(),
@@ -1137,7 +1231,7 @@ impl Service {
                         };
                     // Extract version from changelog (first line usually has version info)
                     let version = extract_version_from_changelog(&changelog_content);
-                    (changelog_content, update_stream, version)
+                    (changelog_content, update_stream, version, hash_arc)
                 }
             };
 
@@ -1218,14 +1312,14 @@ impl Service {
                 UpdateSource::Url(url) => {
                     let desc = url.clone();
                     let result =
-                        Self::process_url_update(data.clone(), btrfs.clone(), url, update_stream)
+                        Self::process_url_update(data.clone(), btrfs.clone(), url, update_stream, hash_arc.clone())
                             .await;
                     (desc, result)
                 }
                 UpdateSource::File(path) => {
                     let desc = path.display().to_string();
                     let result =
-                        Self::process_file_update(data.clone(), btrfs.clone(), path, update_stream)
+                        Self::process_file_update(data.clone(), btrfs.clone(), path, update_stream, hash_arc.clone())
                             .await;
                     (desc, result)
                 }
