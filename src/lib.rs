@@ -45,4 +45,7 @@ pub enum ServiceError {
 
     #[error("Public key import error")]
     PubKeyImportError,
+
+    #[error("No update available")]
+    NoUpdateAvailable,
 }
