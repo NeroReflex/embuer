@@ -4,8 +4,11 @@ pub mod btrfs;
 pub mod config;
 pub mod dbus;
 pub mod ffi;
+pub mod hash_stream;
 pub mod manifest;
+pub mod progress_stream;
 pub mod service;
+pub mod status;
 
 use zbus::Error as ZError;
 

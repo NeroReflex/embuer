@@ -5,7 +5,10 @@ use tokio::sync::RwLock;
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
-use crate::service::{Service, UpdateRequest, UpdateSource, UpdateStatus};
+use crate::{
+    service::{Service, UpdateRequest, UpdateSource},
+    status::UpdateStatus,
+};
 
 pub struct EmbuerDBus {
     service: Arc<RwLock<Service>>,

@@ -1,9 +1,11 @@
+use crate::hash_stream::HashingReader;
+use crate::progress_stream::ProgressReader;
+use crate::status::UpdateStatus;
 use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
-use sha2::{Digest, Sha512};
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,209 +32,6 @@ pub enum UpdateSource {
 #[derive(Debug, Clone)]
 pub struct UpdateRequest {
     pub source: UpdateSource,
-}
-
-/// Current status of the update process
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateStatus {
-    /// No update in progress
-    Idle,
-    /// Checking for updates
-    Checking,
-    /// Clearing old deployments
-    Clearing,
-    /// Downloading update (with progress 0-100, or -1 if unknown)
-    Downloading { source: String, progress: i32 },
-    /// Installing update (with progress 0-100, or -1 if unknown)
-    Installing { source: String, progress: i32 },
-    /// Awaiting user confirmation to install
-    AwaitingConfirmation { version: String, source: String },
-    /// Update completed successfully
-    Completed { source: String },
-    /// Update failed
-    Failed { source: String, error: String },
-}
-
-impl UpdateStatus {
-    /// Convert status to a string representation for DBus
-    pub fn as_str(&self) -> &str {
-        match self {
-            UpdateStatus::Idle => "Idle",
-            UpdateStatus::Checking => "Checking",
-            UpdateStatus::Clearing => "Clearing",
-            UpdateStatus::Downloading { .. } => "Downloading",
-            UpdateStatus::Installing { .. } => "Installing",
-            UpdateStatus::AwaitingConfirmation { .. } => "AwaitingConfirmation",
-            UpdateStatus::Completed { .. } => "Completed",
-            UpdateStatus::Failed { .. } => "Failed",
-        }
-    }
-
-    /// Get additional details about the status
-    pub fn details(&self) -> String {
-        match self {
-            UpdateStatus::Idle => String::new(),
-            UpdateStatus::Checking => String::new(),
-            UpdateStatus::Clearing => String::new(),
-            UpdateStatus::Downloading { source, .. } => source.clone(),
-            UpdateStatus::Installing { source, .. } => source.clone(),
-            UpdateStatus::AwaitingConfirmation { version, source } => {
-                format!("{} ({})", version, source)
-            }
-            UpdateStatus::Completed { source } => source.clone(),
-            UpdateStatus::Failed { source, error } => format!("{}: {}", source, error),
-        }
-    }
-
-    /// Get progress percentage (0-100, or -1 if not applicable/unknown)
-    pub fn progress(&self) -> i32 {
-        match self {
-            UpdateStatus::Downloading { progress, .. } => *progress,
-            UpdateStatus::Installing { progress, .. } => *progress,
-            _ => -1,
-        }
-    }
-}
-
-/// A wrapper around AsyncRead that computes SHA512 hash incrementally
-/// The hash result is stored in an Arc for retrieval after streaming completes
-pub struct HashingReader<R> {
-    inner: R,
-    hasher: Sha512,
-    hash_result: Arc<RwLock<Option<String>>>,
-}
-
-impl<R: AsyncRead + Unpin> HashingReader<R> {
-    pub fn new(inner: R) -> Self {
-        Self {
-            inner,
-            hasher: Sha512::new(),
-            hash_result: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    pub fn hash_result(&self) -> Arc<RwLock<Option<String>>> {
-        self.hash_result.clone()
-    }
-
-    fn finalize_hash(&mut self) {
-        let hash = std::mem::replace(&mut self.hasher, Sha512::new()).finalize();
-        let hex_hash = hex::encode(hash);
-        if let Ok(mut result) = self.hash_result.try_write() {
-            *result = Some(hex_hash);
-        }
-    }
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let before = buf.filled().len();
-        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-
-        if let Poll::Ready(Ok(())) = &result {
-            // Update hasher with the newly read data
-            let newly_read = &buf.filled()[before..];
-            if !newly_read.is_empty() {
-                self.hasher.update(newly_read);
-            }
-            
-            // Check if we've reached EOF (no new data and buffer is at capacity)
-            if newly_read.is_empty() && buf.remaining() == 0 {
-                // Finalize the hash when stream ends
-                self.finalize_hash();
-            }
-        }
-
-        result
-    }
-}
-
-impl<R> std::fmt::Debug for HashingReader<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HashingReader")
-    }
-}
-
-impl<R> Unpin for HashingReader<R> {}
-
-/// A wrapper around AsyncRead that tracks progress
-struct ProgressReader<R> {
-    inner: R,
-    bytes_read: u64,
-    total_size: Option<u64>,
-    status_handle: Arc<RwLock<UpdateStatus>>,
-    source: String,
-    is_installing: bool,
-    last_update: std::time::Instant,
-}
-
-impl<R: AsyncRead + Unpin> ProgressReader<R> {
-    fn new(
-        inner: R,
-        total_size: Option<u64>,
-        status_handle: Arc<RwLock<UpdateStatus>>,
-        source: String,
-        is_installing: bool,
-    ) -> Self {
-        Self {
-            inner,
-            bytes_read: 0,
-            total_size,
-            status_handle,
-            source,
-            is_installing,
-            last_update: std::time::Instant::now(),
-        }
-    }
-
-    fn calculate_progress(&self) -> i32 {
-        self.total_size
-            .filter(|&size| size > 0)
-            .map(|size| ((self.bytes_read as f64 / size as f64) * 100.0) as i32)
-            .unwrap_or(-1)
-    }
-
-    fn should_update(&self) -> bool {
-        self.last_update.elapsed().as_millis() > 100
-    }
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let before = buf.filled().len();
-        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-
-        if let Poll::Ready(Ok(())) = &result {
-            let reader = self.get_mut();
-            reader.bytes_read += (buf.filled().len() - before) as u64;
-
-            if reader.should_update() {
-                reader.last_update = std::time::Instant::now();
-                let progress = reader.calculate_progress();
-                let status_handle = reader.status_handle.clone();
-                let source = reader.source.clone();
-                let is_installing = reader.is_installing;
-
-                tokio::spawn(async move {
-                    let mut status = status_handle.write().await;
-                    *status = match is_installing {
-                        true => UpdateStatus::Installing { source, progress },
-                        false => UpdateStatus::Downloading { source, progress },
-                    };
-                });
-            }
-        }
-
-        result
-    }
 }
 
 /// Information about a pending update awaiting confirmation
@@ -887,12 +686,19 @@ impl Service {
     /// Instead, the tar Entry is returned as a streaming AsyncRead that
     /// will be piped directly through xz decompression to btrfs receive.
     /// Only the CHANGELOG (small text file) is read into memory.
-    /// 
+    ///
     /// Returns: (changelog, update_stream, hash_arc)
     async fn extract_url_update_contents(
         url: String,
         status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>, Arc<RwLock<Option<String>>>), ServiceError> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn AsyncRead + Send + Unpin>>,
+            Arc<RwLock<Option<String>>>,
+        ),
+        ServiceError,
+    > {
         let client = Client::new();
         let resp = client
             .get(&url)
@@ -906,7 +712,11 @@ impl Service {
             if status_code.as_u16() == 404 {
                 info!("No update available (404 Not Found) at {}", url);
             } else {
-                info!("Server returned {} at {}, treating as no update available", status_code.as_u16(), url);
+                info!(
+                    "Server returned {} at {}, treating as no update available",
+                    status_code.as_u16(),
+                    url
+                );
             }
             return Err(ServiceError::NoUpdateAvailable);
         }
@@ -986,9 +796,10 @@ impl Service {
         info!("Starting SHA512 computation for update.btrfs.xz");
         let hashing_reader = HashingReader::new(update_stream);
         let hash_arc = hashing_reader.hash_result();
-        
+
         // Wrap with ProgressReader if we have a size
-        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size {
+        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size
+        {
             info!(
                 "Wrapping update stream with progress tracking for {} bytes",
                 size
@@ -1042,7 +853,14 @@ impl Service {
     async fn extract_file_update_contents(
         path: std::path::PathBuf,
         status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<(String, Pin<Box<dyn AsyncRead + Send + Unpin>>, Arc<RwLock<Option<String>>>), ServiceError> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn AsyncRead + Send + Unpin>>,
+            Arc<RwLock<Option<String>>>,
+        ),
+        ServiceError,
+    > {
         let file = File::open(&path).await?;
 
         info!("Opening update archive from file: {}", path.display());
@@ -1093,7 +911,7 @@ impl Service {
             }
         }
 
-        let mut update_stream = update_stream.ok_or_else(|| {
+        let update_stream = update_stream.ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other(
                 "update.btrfs.xz not found in archive",
             ))
@@ -1103,9 +921,10 @@ impl Service {
         info!("Starting SHA512 computation for update.btrfs.xz");
         let hashing_reader = HashingReader::new(update_stream);
         let hash_arc = hashing_reader.hash_result();
-        
+
         // Wrap with ProgressReader if we have a size
-        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size {
+        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size
+        {
             info!(
                 "Wrapping update stream with progress tracking for {} bytes",
                 size
@@ -1186,10 +1005,7 @@ impl Service {
                             Err(ServiceError::NoUpdateAvailable) => {
                                 // No update available is not an error, just return to Idle
                                 info!("No update available at {}", source_desc);
-                                data.read()
-                                    .await
-                                    .set_status(UpdateStatus::Idle)
-                                    .await;
+                                data.read().await.set_status(UpdateStatus::Idle).await;
                                 continue;
                             }
                             Err(err) => {
@@ -1311,16 +1127,26 @@ impl Service {
             let (source_desc, result) = match request.source {
                 UpdateSource::Url(url) => {
                     let desc = url.clone();
-                    let result =
-                        Self::process_url_update(data.clone(), btrfs.clone(), url, update_stream, hash_arc.clone())
-                            .await;
+                    let result = Self::process_url_update(
+                        data.clone(),
+                        btrfs.clone(),
+                        url,
+                        update_stream,
+                        hash_arc.clone(),
+                    )
+                    .await;
                     (desc, result)
                 }
                 UpdateSource::File(path) => {
                     let desc = path.display().to_string();
-                    let result =
-                        Self::process_file_update(data.clone(), btrfs.clone(), path, update_stream, hash_arc.clone())
-                            .await;
+                    let result = Self::process_file_update(
+                        data.clone(),
+                        btrfs.clone(),
+                        path,
+                        update_stream,
+                        hash_arc.clone(),
+                    )
+                    .await;
                     (desc, result)
                 }
             };
