@@ -9,9 +9,8 @@ use rsa::{pkcs1::DecodeRsaPublicKey, RsaPublicKey};
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -744,7 +743,12 @@ impl Service {
 
         // The stream is a tar archive - extract it
         let mut archive = Archive::new(progress_reader);
-        let mut entries = archive.entries().unwrap();
+        let mut entries = archive.entries().map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to read tar archive entries: {e}"),
+            ))
+        })?;
 
         let mut changelog_content = String::new();
         let mut update_stream = None;
@@ -753,8 +757,14 @@ impl Service {
         'update: while let Some(file) = entries.next().await {
             match file {
                 Ok(entry) => {
-                    let path = entry.path().unwrap();
-                    let path_str = path.display().to_string();
+                    // Handle the path safely - it might not be valid UTF-8
+                    let path_str = match entry.path() {
+                        Ok(p) => p.display().to_string(),
+                        Err(e) => {
+                            error!("Archive entry has invalid path encoding: {}", e);
+                            continue 'update;
+                        }
+                    };
                     debug!("Found archive entry: {}", path_str);
 
                     // IMPORTANT: CHANGELOG must come before update.btrfs.xz in the archive
@@ -780,8 +790,11 @@ impl Service {
                     }
                 }
                 Err(e) => {
-                    error!("Error reading archive entry: {e}");
-                    break 'update;
+                    error!("Error reading archive entry: {}", e);
+                    return Err(ServiceError::IOError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Corrupted tar archive: {}", e),
+                    )));
                 }
             }
         }
@@ -869,7 +882,12 @@ impl Service {
 
         // The file is a tar archive - extract it
         let mut archive = Archive::new(file);
-        let mut entries = archive.entries().unwrap();
+        let mut entries = archive.entries().map_err(|e| {
+            ServiceError::IOError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to read tar archive entries: {e}"),
+            ))
+        })?;
 
         let mut changelog_content = String::new();
         let mut update_stream = None;
@@ -878,8 +896,14 @@ impl Service {
         'update: while let Some(file) = entries.next().await {
             match file {
                 Ok(entry) => {
-                    let path = entry.path().unwrap();
-                    let path_str = path.display().to_string();
+                    // Handle the path safely - it might not be valid UTF-8
+                    let path_str = match entry.path() {
+                        Ok(p) => p.display().to_string(),
+                        Err(e) => {
+                            error!("Archive entry has invalid path encoding: {}", e);
+                            continue 'update;
+                        }
+                    };
                     debug!("Found archive entry: {}", path_str);
 
                     // IMPORTANT: CHANGELOG must come before update.btrfs.xz in the archive
@@ -906,7 +930,10 @@ impl Service {
                 }
                 Err(e) => {
                     error!("Error reading archive entry: {e}");
-                    break 'update;
+                    return Err(ServiceError::IOError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Corrupted tar archive: {e}"),
+                    )));
                 }
             }
         }
