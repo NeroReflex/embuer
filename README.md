@@ -13,6 +13,16 @@ algorithm and then to btrfs receive.
 Before applying the update and making it bootable a check is performed against the shipped key
 ansuring only approved and signed software can be installed and executed.
 
+## Requirements
+
+Embuer relies on a few key components in order to run on the target:
+  - xz: decompress the btrfs snapshot as a stream
+  - btrfs: uses *btrfs receive* as deploments are just the (compressed) result of *btrfs send*
+  - bash: used to execute certain post-installation scripts
+
+Any system configured this way should be able to run embuer and handle every update size
+(assuming the rootfs is large enough) and the system is correctly configured.
+
 ## Project Structure
 
 Embuer is organized as follows:

@@ -1,5 +1,5 @@
 use crate::ServiceError;
-use log::error;
+use log::{error, info};
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -90,6 +90,7 @@ impl Btrfs {
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
+            .inspect_err(|e| error!("Error in btrfs receive command spawn: {e}"))
             .map_err(ServiceError::IOError)?;
 
         let mut btrfs_stdin = btrfs_proc.stdin.take().ok_or_else(|| {
@@ -108,9 +109,19 @@ impl Btrfs {
         let pipe_task = tokio::spawn(async move {
             let result = tokio::io::copy(&mut input_stream, &mut btrfs_stdin).await;
             if let Err(e) = result {
-                error!("Error piping data to btrfs receive: {}", e);
+                error!("Error piping data to btrfs receive: {e}");
+                return;
             }
-            let _ = btrfs_stdin.shutdown().await;
+
+            let Ok(_) = btrfs_stdin
+                .shutdown()
+                .await
+                .inspect_err(|e| error!("Error closing btrfs receive: {e}"))
+            else {
+                return;
+            };
+
+            info!("Piping data to btrfs receive succeeded");
         });
 
         // Read and parse stderr to extract subvolume name
@@ -128,11 +139,26 @@ impl Btrfs {
             None
         });
 
-        // Wait for piping to complete
-        let _ = pipe_task.await;
+        let (copy_task_res, btrfs_task_res) = tokio::join!(pipe_task, btrfs_proc.wait());
 
-        // Wait for btrfs receive to finish
-        let btrfs_status = btrfs_proc.wait().await?;
+        let Ok(_) = copy_task_res
+            .as_ref()
+            .inspect_err(|e| error!("btrfs copy stream join error: {e}"))
+        else {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "joining to stream to btrfs receive failed",
+            ))));
+        };
+
+        let Ok(btrfs_status) = btrfs_task_res
+            .as_ref()
+            .inspect_err(|e| error!("btrfs receive join error: {e}"))
+        else {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "joining of btrfs receive failed",
+            ))));
+        };
+
         if !btrfs_status.success() {
             return Err(ServiceError::IOError(std::io::Error::other(format!(
                 "btrfs receive failed with status: {btrfs_status}",
@@ -169,9 +195,9 @@ impl Btrfs {
 
         // Check if the filesystem type is btrfs
         let fs_stat = statfs(path_ref).map_err(|e| {
+            let path_str = path.as_ref().as_os_str().to_str().unwrap_or("<error_path>");
             ServiceError::IOError(std::io::Error::other(format!(
-                "Failed to get filesystem info for {:?}: {}",
-                path_ref, e
+                "Failed to get filesystem info for {path_str}: {e}"
             )))
         })?;
 

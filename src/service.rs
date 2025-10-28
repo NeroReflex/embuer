@@ -128,37 +128,52 @@ impl ServiceInner {
             }
         });
 
-        // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
-        debug!("Starting btrfs receive...");
-        let subvolume_result = btrfs.receive(&self.deployments_dir, xz_stdout).await;
+        let (xz_input_task_res, xz_task_res, btrfs_task_res) = tokio::join!(
+            // Copy bytes from incoming stream to xz
+            input_to_xz,
+            // Run the xz command receiving the stream
+            xz_proc.wait(),
+            // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
+            btrfs.receive(&self.deployments_dir, xz_stdout)
+        );
 
-        // Wait for piping task
-        if let Err(e) = input_to_xz.await {
-            warn!("Piping task panicked: {}", e);
-        }
+        let Ok(_) = xz_input_task_res
+            .as_ref()
+            .inspect_err(|e| error!("xz input stream join error: {e}"))
+        else {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "joining stream to xz failed",
+            ))));
+        };
+
+        let Ok(xz_status) = xz_task_res
+            .as_ref()
+            .inspect_err(|e| error!("xz process join error: {e}"))
+        else {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "joining stream to xz failed",
+            ))));
+        };
+
+        let Ok(subvolume_result) = btrfs_task_res
+            .as_ref()
+            .inspect_err(|e| error!("btrfs receive join error: {e}"))
+        else {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "joining of btrfs receive failed",
+            ))));
+        };
 
         // Wait for xz process to finish
-        let xz_status = xz_proc.wait().await?;
         if !xz_status.success() {
-            let error_msg = format!("xz decompressor failed with status: {}", xz_status);
-            error!("{}", error_msg);
-            return Err(ServiceError::IOError(std::io::Error::other(error_msg)));
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "xz decompressor failed with status: {xz_status}"
+            ))));
         }
 
         debug!("xz decompression completed successfully");
 
-        // Check if btrfs receive succeeded
-        match subvolume_result {
-            Ok(subvol) => Ok(subvol),
-            Err(e) => {
-                // Check if the error is due to an existing subvolume
-                let error_string = e.to_string();
-                if error_string.contains("already exists") {
-                    warn!("Subvolume already exists, this should have been cleaned up");
-                }
-                Err(e)
-            }
-        }
+        Ok(subvolume_result.clone())
     }
 
     /// Set status helper
