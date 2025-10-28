@@ -83,10 +83,11 @@ impl Btrfs {
     {
         use tokio::io::AsyncWriteExt;
 
-        let mut btrfs_proc = TokioCommand::new("btrfs")
-            .arg("receive")
-            .arg(path.as_ref().as_os_str())
-            .arg("-e")
+        let lossy_path = path.as_ref().as_os_str().to_string_lossy();
+        let command = format!("btrfs receive {lossy_path} -e 1>&2");
+        let mut btrfs_proc = TokioCommand::new("bash")
+            .arg("-c")
+            .arg(command)
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -99,19 +100,23 @@ impl Btrfs {
             ))
         })?;
 
-        let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
+        let btrfs_stdout = btrfs_proc.stdout.take().ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other(
                 "Failed to open stderr for btrfs receive",
             ))
         })?;
 
+        // Create the btrfs stdout reader
+        let btrfs_stdout_reader = BufReader::new(btrfs_stdout);
+
         // Pipe input stream -> btrfs stdin
         let pipe_task = tokio::spawn(async move {
-            let result = tokio::io::copy(&mut input_stream, &mut btrfs_stdin).await;
-            if let Err(e) = result {
-                error!("Error piping data to btrfs receive: {e}");
+            let Ok(copy_res) = tokio::io::copy(&mut input_stream, &mut btrfs_stdin)
+                .await
+                .inspect_err(|e| error!("Error piping data to btrfs receive: {e}"))
+            else {
                 return;
-            }
+            };
 
             let Ok(_) = btrfs_stdin
                 .shutdown()
@@ -121,22 +126,7 @@ impl Btrfs {
                 return;
             };
 
-            info!("Piping data to btrfs receive succeeded");
-        });
-
-        // Read and parse stderr to extract subvolume name
-        let stderr_task = tokio::spawn(async move {
-            let reader = BufReader::new(btrfs_stderr);
-            let mut lines = reader.lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Parse line like "At subvol subvolname"
-                if let Some(subvol_name) = line.strip_prefix("At subvol ") {
-                    return Some(subvol_name.to_string());
-                }
-            }
-
-            None
+            info!("Piping data from xz to to btrfs receive succeeded: {copy_res} bytes copied");
         });
 
         let (copy_task_res, btrfs_task_res) = tokio::join!(pipe_task, btrfs_proc.wait());
@@ -166,13 +156,15 @@ impl Btrfs {
         }
 
         // Get the parsed subvolume name
-        let subvolume = stderr_task.await.map_err(|e| {
-            ServiceError::IOError(std::io::Error::other(format!(
-                "Failed to read btrfs receive output: {e}",
-            )))
-        })?;
+        let mut lines = btrfs_stdout_reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // Parse line like "At subvol subvolname"
+            if let Some(subvol_name) = line.strip_prefix("At subvol ") {
+                return Ok(Some(subvol_name.to_string()));
+            }
+        }
 
-        Ok(subvolume)
+        Ok(None)
     }
 
     /// Check if the given directory is a btrfs subvolume.
