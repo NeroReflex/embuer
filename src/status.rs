@@ -14,7 +14,7 @@ pub enum UpdateStatus {
     /// Awaiting user confirmation to install
     AwaitingConfirmation { version: String, source: String },
     /// Update completed successfully
-    Completed { source: String },
+    Completed { source: String, deployment: String },
     /// Update failed
     Failed { source: String, error: String },
 }
@@ -45,7 +45,9 @@ impl UpdateStatus {
             UpdateStatus::AwaitingConfirmation { version, source } => {
                 format!("{} ({})", version, source)
             }
-            UpdateStatus::Completed { source } => source.clone(),
+            UpdateStatus::Completed { source, deployment } => {
+                format!("{} installed as {}", source, deployment)
+            }
             UpdateStatus::Failed { source, error } => format!("{}: {}", source, error),
         }
     }

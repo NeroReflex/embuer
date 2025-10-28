@@ -51,4 +51,7 @@ pub enum ServiceError {
 
     #[error("No update available")]
     NoUpdateAvailable,
+
+    #[error("Missing update size")]
+    MissingUpdateSize,
 }

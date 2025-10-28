@@ -31,6 +31,17 @@ impl<R: AsyncRead + Unpin> HashingReader<R> {
         self.hash_result.clone()
     }
 
+    /// Finalize the hash and return it directly
+    /// Call this after the stream has been fully consumed
+    pub async fn get_hash(&mut self) -> Option<String> {
+        let hash = std::mem::replace(&mut self.hasher, Sha512::new()).finalize();
+        let hex_hash = hex::encode(hash);
+        if let Ok(mut result) = self.hash_result.try_write() {
+            *result = Some(hex_hash.clone());
+        }
+        Some(hex_hash)
+    }
+
     fn finalize_hash(&mut self) {
         let hash = std::mem::replace(&mut self.hasher, Sha512::new()).finalize();
         let hex_hash = hex::encode(hash);

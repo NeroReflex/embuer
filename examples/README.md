@@ -76,7 +76,7 @@ Monitoring for updates...
 ────────────────────────────────────────────────────────────────────────────────
 [2025-10-21 14:52:30] Downloading     │ Fetching update from server              │ [████████████░░░░░░░]  60%
 [2025-10-21 14:52:45] Installing      │ Extracting update files                  │ [███████████████░░░░]  75%
-[2025-10-21 14:53:00] Completed       │ Update installed successfully            │                      N/A
+[2025-10-21 14:53:00] Completed       │ http://example.com/update.tar installed as deployment-12345 │ N/A
 ```
 
 ## Building All Examples

@@ -7,6 +7,11 @@ CC?=cc
 # Default target
 all: build
 
+# Generate C header from Rust source
+header:
+	cargo build --release
+	@find target -name embuer.h -exec cp {} . \; 2>/dev/null || true
+
 # Build in debug mode
 build:
 	cargo build
@@ -14,6 +19,7 @@ build:
 # Build in release mode
 build-release:
 	cargo build --release
+	@find target -name embuer.h -exec cp {} . \; 2>/dev/null || true
 
 # Clean build artifacts
 clean:

@@ -540,15 +540,21 @@ impl Service {
         data: &Arc<RwLock<ServiceInner>>,
         btrfs: &Arc<Btrfs>,
         reader: R,
-        hash_arc: Arc<RwLock<Option<String>>>,
-    ) -> Result<(), ServiceError>
+    ) -> Result<Option<String>, ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        // Create hashing reader to compute SHA512 during streaming
+        let hashing_reader = HashingReader::new(reader);
+        let hash_result = hashing_reader.hash_result();
+
         let subvolume = data
             .read()
             .await
-            .receive_btrfs_stream(btrfs, reader)
+            .receive_btrfs_stream(
+                btrfs,
+                Box::pin(hashing_reader) as Pin<Box<dyn AsyncRead + Send + Unpin>>,
+            )
             .await?;
         let name = subvolume.ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other("No subvolume name found"))
@@ -662,21 +668,26 @@ impl Service {
                 info!("Install script completed successfully");
             }
         }
+
         //info!("Installed manifest version: {}", manifest.version);
 
-        info!("Installed deployment {name} (ID={subvol_id})");
-
         // Extract and print the SHA512 hash computed during streaming
-        if let Some(hash) = hash_arc.read().await.as_ref() {
-            info!("update.btrfs.xz SHA512: {}", hash);
-        } else {
+        let hash = hash_result.read().await;
+        let Some(hash) = hash.as_deref() else {
             debug!("update.btrfs.xz SHA512: (not yet available)");
-        }
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Failed to compute SHA512 hash of update stream",
+            )));
+        };
+
+        info!("update.btrfs.xz SHA512: {hash}");
 
         // Make the new subvolume the default for next boot
         btrfs.subvolume_set_default(subvol_id, &rootfs_path)?;
 
-        Ok(())
+        info!("Installed deployment {name} (ID={subvol_id})");
+
+        Ok(name.into())
     }
 
     /// Extract changelog and update stream from URL
@@ -686,18 +697,10 @@ impl Service {
     /// will be piped directly through xz decompression to btrfs receive.
     /// Only the CHANGELOG (small text file) is read into memory.
     ///
-    /// Returns: (changelog, update_stream, hash_arc)
+    /// Returns: (changelog, archive)
     async fn extract_url_update_contents(
         url: String,
-        status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn AsyncRead + Send + Unpin>>,
-            Arc<RwLock<Option<String>>>,
-        ),
-        ServiceError,
-    > {
+    ) -> Result<Archive<Box<dyn AsyncRead + Send + Unpin>>, ServiceError> {
         let client = Client::new();
         let resp = client
             .get(&url)
@@ -709,152 +712,23 @@ impl Service {
         if !resp.status().is_success() {
             let status_code = resp.status();
             if status_code.as_u16() == 404 {
-                info!("No update available (404 Not Found) at {}", url);
+                info!("No update available (404 Not Found) at {url}");
             } else {
-                info!(
-                    "Server returned {} at {}, treating as no update available",
-                    status_code.as_u16(),
-                    url
-                );
+                info!("Server returned {status_code} at {url}: treating as no update available");
             }
             return Err(ServiceError::NoUpdateAvailable);
         }
 
         info!("Downloading update from {}", url);
         let total_size = resp.content_length();
-        total_size.map(|size| info!("Download size: {} bytes", size));
-
-        // Set initial downloading status
-        *status_handle.write().await = UpdateStatus::Downloading {
-            source: url.clone(),
-            progress: 0,
-        };
+        total_size.map(|size| info!("Download size: {size} bytes"));
 
         let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
         let stream_reader = StreamReader::new(byte_stream);
 
-        let progress_reader = ProgressReader::new(
-            stream_reader,
-            total_size,
-            status_handle.clone(),
-            url.clone(),
-            false,
-        );
-
-        // The stream is a tar archive - extract it
-        let mut archive = Archive::new(progress_reader);
-        let mut entries = archive.entries().map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to read tar archive entries: {e}"),
-            ))
-        })?;
-
-        let mut changelog_content = String::new();
-        let mut update_stream = None;
-        let mut update_size: Option<u64> = None;
-
-        'update: while let Some(file) = entries.next().await {
-            match file {
-                Ok(entry) => {
-                    // Handle the path safely - it might not be valid UTF-8
-                    let path_str = match entry.path() {
-                        Ok(p) => p.display().to_string(),
-                        Err(e) => {
-                            error!("Archive entry has invalid path encoding: {}", e);
-                            continue 'update;
-                        }
-                    };
-                    debug!("Found archive entry: {}", path_str);
-
-                    // IMPORTANT: CHANGELOG must come before update.btrfs.xz in the archive
-                    if path_str == "CHANGELOG" {
-                        debug!("Found CHANGELOG entry");
-                        let mut content = String::new();
-                        let mut reader = BufReader::new(entry);
-                        reader.read_to_string(&mut content).await?;
-                        changelog_content = content;
-                        info!("Extracted CHANGELOG ({} bytes)", changelog_content.len());
-                    } else if path_str == "update.btrfs.xz" {
-                        debug!("Found update.btrfs.xz entry");
-                        // Get the entry size for progress tracking (size of update.btrfs.xz, not the tar)
-                        let header = entry.header();
-                        let size = header.entry_size().unwrap_or(0);
-                        update_size = Some(size);
-                        info!("update.btrfs.xz size: {} bytes", size);
-                        // The entry itself is an AsyncRead, so we can use it directly
-                        // Wrap it in a box to make it 'static
-                        update_stream =
-                            Some(Box::pin(entry) as Pin<Box<dyn AsyncRead + Send + Unpin>>);
-                        // Continue reading in case there are more entries
-                    }
-                }
-                Err(e) => {
-                    error!("Error reading archive entry: {}", e);
-                    return Err(ServiceError::IOError(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Corrupted tar archive: {}", e),
-                    )));
-                }
-            }
-        }
-
-        let update_stream = update_stream.ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::other(
-                "update.btrfs.xz not found in archive",
-            ))
-        })?;
-
-        // Wrap the stream with HashingReader to compute SHA512 while streaming
-        info!("Starting SHA512 computation for update.btrfs.xz");
-        let hashing_reader = HashingReader::new(update_stream);
-        let hash_arc = hashing_reader.hash_result();
-
-        // Wrap with ProgressReader if we have a size
-        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size
-        {
-            info!(
-                "Wrapping update stream with progress tracking for {} bytes",
-                size
-            );
-            let progress_reader = ProgressReader::new(
-                Box::pin(hashing_reader),
-                Some(size),
-                status_handle.clone(),
-                url.clone(),
-                true, // This is installation phase
-            );
-            Box::pin(progress_reader)
-        } else {
-            Box::pin(hashing_reader)
-        };
-
-        Ok((changelog_content, wrapped_stream, hash_arc))
-    }
-
-    /// Process update from URL
-    ///
-    /// IMPORTANT: This streams the update.btrfs.xz file directly from the tar archive
-    /// through xz decompression and into btrfs receive. The file is NEVER written to disk.
-    async fn process_url_update(
-        data: Arc<RwLock<ServiceInner>>,
-        btrfs: Arc<Btrfs>,
-        url: String,
-        update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
-        hash_arc: Arc<RwLock<Option<String>>>,
-    ) -> Result<(), ServiceError> {
-        let status_handle = data.read().await.update_status.clone();
-
-        // Transition to installing
-        *status_handle.write().await = UpdateStatus::Installing {
-            source: url,
-            progress: 0,
-        };
-
-        // CRITICAL: Stream update.btrfs.xz directly through pipes without touching disk
-        // The stream goes: tar Entry -> xz -d -> btrfs receive (all in memory/pipes)
-        // Note: SHA512 hash is computed during streaming inside HashingReader
-        Self::install_update(&data, &btrfs, update_stream, hash_arc).await
+        Ok(Archive::new(
+            Box::new(stream_reader) as Box<dyn AsyncRead + Send + Unpin>
+        ))
     }
 
     /// Extract changelog and update stream from file
@@ -865,135 +739,16 @@ impl Service {
     /// Only the CHANGELOG (small text file) is read into memory.
     async fn extract_file_update_contents(
         path: std::path::PathBuf,
-        status_handle: Arc<RwLock<UpdateStatus>>,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn AsyncRead + Send + Unpin>>,
-            Arc<RwLock<Option<String>>>,
-        ),
-        ServiceError,
-    > {
+    ) -> Result<Archive<Box<dyn AsyncRead + Send + Unpin>>, ServiceError> {
         let file = File::open(&path).await?;
 
         info!("Opening update archive from file: {}", path.display());
         let total_size = file.metadata().await.ok().map(|m| m.len());
         total_size.map(|size| info!("File size: {} bytes", size));
 
-        // The file is a tar archive - extract it
-        let mut archive = Archive::new(file);
-        let mut entries = archive.entries().map_err(|e| {
-            ServiceError::IOError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to read tar archive entries: {e}"),
-            ))
-        })?;
-
-        let mut changelog_content = String::new();
-        let mut update_stream = None;
-        let mut update_size: Option<u64> = None;
-
-        'update: while let Some(file) = entries.next().await {
-            match file {
-                Ok(entry) => {
-                    // Handle the path safely - it might not be valid UTF-8
-                    let path_str = match entry.path() {
-                        Ok(p) => p.display().to_string(),
-                        Err(e) => {
-                            error!("Archive entry has invalid path encoding: {}", e);
-                            continue 'update;
-                        }
-                    };
-                    debug!("Found archive entry: {}", path_str);
-
-                    // IMPORTANT: CHANGELOG must come before update.btrfs.xz in the archive
-                    if path_str == "CHANGELOG" {
-                        debug!("Found CHANGELOG entry");
-                        let mut content = String::new();
-                        let mut reader = BufReader::new(entry);
-                        reader.read_to_string(&mut content).await?;
-                        changelog_content = content;
-                        info!("Extracted CHANGELOG ({} bytes)", changelog_content.len());
-                    } else if path_str == "update.btrfs.xz" {
-                        debug!("Found update.btrfs.xz entry");
-                        // Get the entry size for progress tracking (size of update.btrfs.xz, not the tar)
-                        let header = entry.header();
-                        let size = header.entry_size().unwrap_or(0);
-                        update_size = Some(size);
-                        info!("update.btrfs.xz size: {} bytes", size);
-                        // The entry itself is an AsyncRead, so we can use it directly
-                        // Wrap it in a box to make it 'static
-                        update_stream =
-                            Some(Box::pin(entry) as Pin<Box<dyn AsyncRead + Send + Unpin>>);
-                        // Continue reading in case there are more entries
-                    }
-                }
-                Err(e) => {
-                    error!("Error reading archive entry: {e}");
-                    return Err(ServiceError::IOError(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Corrupted tar archive: {e}"),
-                    )));
-                }
-            }
-        }
-
-        let update_stream = update_stream.ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::other(
-                "update.btrfs.xz not found in archive",
-            ))
-        })?;
-
-        // Wrap the stream with HashingReader to compute SHA512 while streaming
-        info!("Starting SHA512 computation for update.btrfs.xz");
-        let hashing_reader = HashingReader::new(update_stream);
-        let hash_arc = hashing_reader.hash_result();
-
-        // Wrap with ProgressReader if we have a size
-        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = if let Some(size) = update_size
-        {
-            info!(
-                "Wrapping update stream with progress tracking for {} bytes",
-                size
-            );
-            let progress_reader = ProgressReader::new(
-                Box::pin(hashing_reader),
-                Some(size),
-                status_handle,
-                path.display().to_string(),
-                true, // This is installation phase
-            );
-            Box::pin(progress_reader)
-        } else {
-            Box::pin(hashing_reader)
-        };
-
-        Ok((changelog_content, wrapped_stream, hash_arc))
-    }
-
-    /// Process update from file
-    ///
-    /// IMPORTANT: This streams the update.btrfs.xz file directly from the tar archive
-    /// through xz decompression and into btrfs receive. The file is NEVER written to disk.
-    async fn process_file_update(
-        data: Arc<RwLock<ServiceInner>>,
-        btrfs: Arc<Btrfs>,
-        path: std::path::PathBuf,
-        update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
-        hash_arc: Arc<RwLock<Option<String>>>,
-    ) -> Result<(), ServiceError> {
-        let path_str = path.display().to_string();
-        let status_handle = data.read().await.update_status.clone();
-
-        *status_handle.write().await = UpdateStatus::Installing {
-            source: path_str,
-            progress: 0,
-        };
-
-        // CRITICAL: Stream update.btrfs.xz directly through pipes without touching disk
-        // The stream goes: tar Entry -> xz -d -> btrfs receive (all in memory/pipes)
-        // Note: SHA512 hash is computed during streaming inside HashingReader
-        Self::install_update(&data, &btrfs, update_stream, hash_arc).await
+        Ok(Archive::new(
+            Box::new(file) as Box<dyn AsyncRead + Send + Unpin>
+        ))
     }
 
     /// Main update request loop that processes all update requests from the channel.
@@ -1012,7 +767,7 @@ impl Service {
             .take()
             .expect("Confirmation receiver should be available");
 
-        while let Some(request) = update_rx.recv().await {
+        'check_req: while let Some(request) = update_rx.recv().await {
             info!("Processing update request: {:?}", request.source);
 
             let source_desc = match &request.source {
@@ -1020,185 +775,311 @@ impl Service {
                 UpdateSource::File(path) => path.display().to_string(),
             };
 
-            // Extract changelog and prepare update stream from the archive
-            // This reads the tar archive (CHANGELOG must come before update.btrfs.xz)
-            info!("Extracting archive contents...");
+            // Update status to Installing and at 0% progress
             let status_handle = data.read().await.update_status.clone();
-            let (changelog, update_stream, version, hash_arc) = match request.source.clone() {
+            *status_handle.write().await = UpdateStatus::Installing {
+                source: source_desc.clone(),
+                progress: 0,
+            };
+
+            // Prepare the archive object from the source
+            info!("Fetching update archive contents...");
+            let mut archive = match request.source.clone() {
                 UpdateSource::Url(url) => {
-                    let (changelog_content, update_stream, hash_arc) =
-                        match Self::extract_url_update_contents(url, status_handle).await {
-                            Ok(result) => result,
-                            Err(ServiceError::NoUpdateAvailable) => {
-                                // No update available is not an error, just return to Idle
-                                info!("No update available at {}", source_desc);
-                                data.read().await.set_status(UpdateStatus::Idle).await;
-                                continue;
-                            }
-                            Err(err) => {
-                                error!("Failed to extract update contents: {}", err);
-                                data.read()
-                                    .await
-                                    .set_status(UpdateStatus::Failed {
-                                        source: source_desc,
-                                        error: err.to_string(),
-                                    })
-                                    .await;
-                                continue;
-                            }
-                        };
-                    // Extract version from changelog (first line usually has version info)
-                    let version = extract_version_from_changelog(&changelog_content);
-                    (changelog_content, update_stream, version, hash_arc)
+                    match Self::extract_url_update_contents(url).await {
+                        Ok(result) => result,
+                        Err(ServiceError::NoUpdateAvailable) => {
+                            // No update available is not an error, just return to Idle
+                            info!("No update available at {source_desc}");
+                            data.read().await.set_status(UpdateStatus::Idle).await;
+                            continue 'check_req;
+                        }
+                        Err(err) => {
+                            error!("Failed to read update contents from {source_desc}: {err}");
+                            data.read()
+                                .await
+                                .set_status(UpdateStatus::Failed {
+                                    source: source_desc,
+                                    error: err.to_string(),
+                                })
+                                .await;
+                            continue 'check_req;
+                        }
+                    }
                 }
                 UpdateSource::File(path) => {
-                    let (changelog_content, update_stream, hash_arc) =
-                        match Self::extract_file_update_contents(
-                            path.clone(),
-                            status_handle.clone(),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(err) => {
-                                error!("Failed to extract update contents: {}", err);
-                                data.read()
-                                    .await
-                                    .set_status(UpdateStatus::Failed {
-                                        source: source_desc,
-                                        error: err.to_string(),
-                                    })
-                                    .await;
-                                continue;
-                            }
-                        };
-                    // Extract version from changelog (first line usually has version info)
-                    let version = extract_version_from_changelog(&changelog_content);
-                    (changelog_content, update_stream, version, hash_arc)
+                    match Self::extract_file_update_contents(path.clone()).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            error!("Failed to read update contents from {source_desc}: {err}");
+                            data.read()
+                                .await
+                                .set_status(UpdateStatus::Failed {
+                                    source: source_desc,
+                                    error: err.to_string(),
+                                })
+                                .await;
+                            continue 'check_req;
+                        }
+                    }
                 }
             };
 
-            // Check if we need user confirmation
-            if !config.auto_install_updates() {
-                info!("Auto-install disabled, awaiting user confirmation");
-
-                let pending = PendingUpdate {
-                    version: version.clone(),
-                    changelog: changelog.clone(),
-                    source: source_desc.clone(),
-                };
-
-                // Set pending update and update status
-                *data.read().await.pending_update.write().await = Some(pending);
+            // Get the iterator over archive entries (contained files)
+            let Ok(mut entries) = archive
+                .entries()
+                .inspect_err(|err| error!("Failed to read archive entries: {err}"))
+            else {
                 data.read()
                     .await
-                    .set_status(UpdateStatus::AwaitingConfirmation {
-                        version: version.clone(),
-                        source: source_desc.clone(),
+                    .set_status(UpdateStatus::Failed {
+                        source: source_desc,
+                        error: "Failed to read archive entries".to_string(),
                     })
                     .await;
+                continue 'check_req;
+            };
 
-                info!("Waiting for user confirmation...");
+            // Collect CHANGELOG and process update.btrfs.xz
+            let mut changelog_content: Option<String> = None;
 
-                // SECURITY: Wait for confirmation - this blocks until a valid confirmation is received
-                // The channel has minimal capacity (1), combined with pending_update guards to prevent premature confirmations
-                match confirmation_rx.recv().await {
-                    Some(true) => {
-                        info!("Update accepted by user, proceeding with installation");
-                        // SECURITY: Clear pending update immediately to prevent double-confirmation
-                        *data.read().await.pending_update.write().await = None;
+            'update: while let Some(file) = entries.next().await {
+                match file {
+                    Ok(entry) => {
+                        // Handle the path safely - it might not be valid UTF-8
+                        let path_str = match entry.path() {
+                            Ok(p) => p.display().to_string(),
+                            Err(e) => {
+                                error!("Archive entry has invalid path encoding: {}", e);
+                                continue 'update;
+                            }
+                        };
+                        debug!("Found archive entry: {}", path_str);
+
+                        if path_str == "CHANGELOG" {
+                            debug!("Found CHANGELOG");
+                            let mut content = String::new();
+                            let mut reader = BufReader::new(entry);
+                            if let Err(err) = reader.read_to_string(&mut content).await {
+                                error!("Failed to read CHANGELOG: {}", err);
+                                data.read()
+                                    .await
+                                    .set_status(UpdateStatus::Failed {
+                                        source: source_desc.clone(),
+                                        error: format!("Failed to read CHANGELOG: {}", err),
+                                    })
+                                    .await;
+                                continue 'check_req;
+                            }
+                            info!("Read CHANGELOG file: {} bytes", content.len());
+                            changelog_content = Some(content);
+                        } else if path_str == "update.btrfs.xz" {
+                            debug!("Found update.btrfs.xz");
+                            let header = entry.header();
+                            let entry_size = match header.entry_size() {
+                                Ok(sz) => sz,
+                                Err(err) => {
+                                    error!("Failed to read entry size: {}", err);
+                                    data.read()
+                                        .await
+                                        .set_status(UpdateStatus::Failed {
+                                            source: source_desc.clone(),
+                                            error: format!(
+                                                "Failed to get update.btrfs.xz size: {}",
+                                                err
+                                            ),
+                                        })
+                                        .await;
+                                    continue 'check_req;
+                                }
+                            };
+                            info!("update.btrfs.xz size: {entry_size} bytes");
+
+                            // CRITICAL: Process the update stream immediately while the entry is valid
+                            // We must consume the entire stream before moving to the next entry
+                            let update_stream =
+                                Box::pin(entry) as Pin<Box<dyn AsyncRead + Send + Unpin>>;
+
+                            // Process this update entry right now
+                            match Self::process_update_entry(
+                                &data,
+                                &btrfs,
+                                config.clone(),
+                                &mut confirmation_rx,
+                                changelog_content.clone(),
+                                update_stream,
+                                entry_size,
+                                source_desc.clone(),
+                            )
+                            .await
+                            {
+                                Ok(should_continue) => {
+                                    if !should_continue {
+                                        continue 'check_req;
+                                    }
+                                }
+                                Err(_) => {
+                                    continue 'check_req;
+                                }
+                            }
+                        }
+                        // For any other entry, we consume and discard it
                     }
-                    Some(false) => {
-                        info!("Update rejected by user");
-                        // SECURITY: Clear pending update immediately
-                        *data.read().await.pending_update.write().await = None;
+                    Err(e) => {
+                        error!("Error reading archive entry: {}", e);
                         data.read()
                             .await
                             .set_status(UpdateStatus::Failed {
-                                source: source_desc,
-                                error: "Update rejected by user".to_string(),
+                                source: source_desc.clone(),
+                                error: format!("Corrupted tar archive: {}", e),
                             })
                             .await;
-                        continue;
-                    }
-                    None => {
-                        error!("Confirmation channel closed unexpectedly");
-                        // SECURITY: Clear pending update on error
-                        *data.read().await.pending_update.write().await = None;
-                        data.read()
-                            .await
-                            .set_status(UpdateStatus::Failed {
-                                source: source_desc,
-                                error: "Confirmation channel closed".to_string(),
-                            })
-                            .await;
-                        continue;
+                        continue 'check_req;
                     }
                 }
             }
-
-            // Step 1: Clear old deployments before installing new ones
-            data.read().await.set_status(UpdateStatus::Clearing).await;
-            match Self::clear_old_deployments(&data, &btrfs).await {
-                Ok(count) => {
-                    info!("Cleared {} old deployments", count);
-                }
-                Err(err) => {
-                    warn!("Failed to clear old deployments: {}", err);
-                    // Continue with installation even if clearing fails
-                }
-            }
-
-            // Step 2: Process the update (download/install) with the already-extracted stream
-            // Note: changelog was already used for confirmation above, we don't pass it here
-            let (source_desc, result) = match request.source {
-                UpdateSource::Url(url) => {
-                    let desc = url.clone();
-                    let result = Self::process_url_update(
-                        data.clone(),
-                        btrfs.clone(),
-                        url,
-                        update_stream,
-                        hash_arc.clone(),
-                    )
-                    .await;
-                    (desc, result)
-                }
-                UpdateSource::File(path) => {
-                    let desc = path.display().to_string();
-                    let result = Self::process_file_update(
-                        data.clone(),
-                        btrfs.clone(),
-                        path,
-                        update_stream,
-                        hash_arc.clone(),
-                    )
-                    .await;
-                    (desc, result)
-                }
-            };
-
-            // Update final status
-            let status = match result {
-                Ok(_) => {
-                    info!("Update installed successfully");
-                    UpdateStatus::Completed {
-                        source: source_desc,
-                    }
-                }
-                Err(ref err) => {
-                    error!("Failed to install update: {}", err);
-                    UpdateStatus::Failed {
-                        source: source_desc,
-                        error: err.to_string(),
-                    }
-                }
-            };
-
-            data.read().await.set_status(status).await;
         }
 
         info!("Update request loop stopped");
+    }
+
+    /// Process an update entry from the archive.
+    /// This handles confirmation and installation within the archive entry loop.
+    /// Returns Ok(true) if processing should continue, Ok(false) if loop should exit,
+    /// Err(_) if there was an error.
+    async fn process_update_entry(
+        data: &Arc<RwLock<ServiceInner>>,
+        btrfs: &Arc<Btrfs>,
+        config: Config,
+        confirmation_rx: &mut mpsc::Receiver<bool>,
+        changelog_content: Option<String>,
+        update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
+        update_size: u64,
+        source_desc: String,
+    ) -> Result<bool, ServiceError> {
+        // Extract version from changelog for confirmation/details
+        let changelog = changelog_content.ok_or_else(|| {
+            ServiceError::IOError(std::io::Error::other("CHANGELOG not found in archive"))
+        })?;
+
+        let version = extract_version_from_changelog(&changelog);
+
+        // Check if we need user confirmation
+        if !config.auto_install_updates() {
+            info!("Auto-install disabled, awaiting user confirmation");
+
+            let pending = PendingUpdate {
+                version: version.clone(),
+                changelog: changelog.clone(),
+                source: source_desc.clone(),
+            };
+
+            // Set pending update and update status
+            *data.read().await.pending_update.write().await = Some(pending);
+            data.read()
+                .await
+                .set_status(UpdateStatus::AwaitingConfirmation {
+                    version: version.clone(),
+                    source: source_desc.clone(),
+                })
+                .await;
+
+            info!("Waiting for user confirmation to install {version}...");
+
+            // SECURITY: Wait for confirmation - this blocks until a valid confirmation is received
+            // The channel has minimal capacity (1), combined with pending_update guards to prevent premature confirmations
+            match confirmation_rx.recv().await {
+                Some(true) => {
+                    info!("Update accepted by user: proceeding...");
+                    // SECURITY: Clear pending update immediately to prevent double-confirmation
+                    *data.read().await.pending_update.write().await = None;
+                }
+                Some(false) => {
+                    info!("Update rejected by user");
+                    // SECURITY: Clear pending update immediately
+                    *data.read().await.pending_update.write().await = None;
+                    data.read()
+                        .await
+                        .set_status(UpdateStatus::Failed {
+                            source: source_desc,
+                            error: "Update rejected by user".to_string(),
+                        })
+                        .await;
+                    return Ok(false);
+                }
+                None => {
+                    error!("Confirmation channel closed unexpectedly");
+                    // SECURITY: Clear pending update on error
+                    *data.read().await.pending_update.write().await = None;
+                    data.read()
+                        .await
+                        .set_status(UpdateStatus::Failed {
+                            source: source_desc,
+                            error: "Confirmation channel closed".to_string(),
+                        })
+                        .await;
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Clear old deployments before installing new ones
+        data.read().await.set_status(UpdateStatus::Clearing).await;
+        match Self::clear_old_deployments(data, btrfs).await {
+            Ok(count) => {
+                info!("Cleared {} old deployments", count);
+            }
+            Err(err) => {
+                warn!("Failed to clear old deployments: {}", err);
+                // Continue with installation even if clearing fails
+            }
+        }
+
+        // Wrap stream with progress tracking
+        let status_handle = data.read().await.update_status.clone();
+        let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = {
+            let progress_reader = ProgressReader::new(
+                update_stream,
+                Some(update_size),
+                status_handle.clone(),
+                source_desc.clone(),
+                true,
+            );
+            Box::pin(progress_reader)
+        };
+
+        // Install using the stream (tar Entry -> xz -d -> btrfs receive)
+        // Hash computation now happens inside install_update
+        let result = Self::install_update(data, btrfs, wrapped_stream).await;
+
+        // Update final status
+        let status = match result {
+            Ok(Some(deployment_name)) => {
+                info!("Update installed successfully: {deployment_name}");
+                UpdateStatus::Completed {
+                    source: source_desc.clone(),
+                    deployment: deployment_name,
+                }
+            }
+            Ok(None) => {
+                error!("Update installed but deployment name not returned");
+                UpdateStatus::Failed {
+                    source: source_desc.clone(),
+                    error: "Deployment name not returned".to_string(),
+                }
+            }
+            Err(ref err) => {
+                error!("Failed to install update: {}", err);
+                UpdateStatus::Failed {
+                    source: source_desc,
+                    error: err.to_string(),
+                }
+            }
+        };
+
+        data.read().await.set_status(status).await;
+
+        Ok(true)
     }
 
     /// Periodic URL checker task that sends update requests to the channel at regular intervals.
@@ -1224,9 +1105,7 @@ impl Service {
                         continue 'check;
                     }
 
-                    // TODO: In a real implementation, you would check if an update is available
-                    // before sending the request (e.g., by checking a version endpoint)
-                    info!("Checking for updates at {}", update_url);
+                    info!("Checking for updates at {update_url}");
 
                     // Send update request to the channel
                     let request = UpdateRequest {
