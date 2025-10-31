@@ -110,9 +110,13 @@ impl ServiceInner {
         })?;
 
         // Pipe input stream -> xz stdin
+        debug!("[PROGRESS] receive_btrfs_stream: Starting to pipe data from ProgressReader -> xz -> btrfs");
         let input_to_xz = tokio::spawn(async move {
+            debug!("[PROGRESS] input_to_xz task: Starting tokio::io::copy - this should trigger ProgressReader::poll_read");
             match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
-                Ok(bytes) => debug!("Piped {} bytes to xz decompressor", bytes),
+                Ok(bytes) => {
+                    debug!("[PROGRESS] input_to_xz task: Piped {} bytes to xz decompressor", bytes);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                     warn!("Broken pipe while sending to xz (xz may have finished early)");
                 }
@@ -674,10 +678,12 @@ impl Service {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        debug!("[PROGRESS] install_update: Creating HashingReader wrapper");
         // Create hashing reader to compute SHA512 during streaming
         let hashing_reader = HashingReader::new(reader);
         let hash_result = hashing_reader.hash_result();
 
+        debug!("[PROGRESS] install_update: Calling receive_btrfs_stream - stream consumption should start now");
         let subvolume = data
             .read()
             .await
@@ -1153,12 +1159,14 @@ impl Service {
         let status_handle = data.read().await.update_status.clone();
         {
             let mut status = status_handle.write().await;
+            debug!("[PROGRESS] Setting status to Installing with progress 0% (update_size: {})", update_size);
             *status = UpdateStatus::Installing {
                 source: source_desc.clone(),
                 progress: 0,
             };
         }
         let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = {
+            debug!("[PROGRESS] Creating ProgressReader with total_size: {:?}", Some(update_size));
             let progress_reader = ProgressReader::new(
                 update_stream,
                 Some(update_size),
@@ -1170,6 +1178,7 @@ impl Service {
 
         // Install using the stream (tar Entry -> xz -d -> btrfs receive)
         // Hash computation now happens inside install_update
+        debug!("[PROGRESS] Starting install_update - stream should start being consumed");
         let result = Self::install_update(data, btrfs, wrapped_stream).await;
 
         // Update final status and clear old deployments only after successful installation
