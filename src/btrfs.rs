@@ -100,14 +100,15 @@ impl Btrfs {
             ))
         })?;
 
-        let btrfs_stdout = btrfs_proc.stdout.take().ok_or_else(|| {
+        // btrfs receive outputs to stderr (via 1>&2 redirection in command)
+        let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other(
                 "Failed to open stderr for btrfs receive",
             ))
         })?;
 
-        // Create the btrfs stdout reader
-        let btrfs_stdout_reader = BufReader::new(btrfs_stdout);
+        // Create the btrfs stderr reader (for parsing subvolume name)
+        let btrfs_stderr_reader = BufReader::new(btrfs_stderr);
 
         // Pipe input stream -> btrfs stdin
         let pipe_task = tokio::spawn(async move {
@@ -155,8 +156,8 @@ impl Btrfs {
             ))));
         }
 
-        // Get the parsed subvolume name
-        let mut lines = btrfs_stdout_reader.lines();
+        // Get the parsed subvolume name from stderr (where btrfs receive outputs it)
+        let mut lines = btrfs_stderr_reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             // Parse line like "At subvol subvolname"
             if let Some(subvol_name) = line.strip_prefix("At subvol ") {
