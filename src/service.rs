@@ -85,6 +85,107 @@ fn extract_version_from_changelog(changelog: &str) -> String {
 }
 
 impl ServiceInner {
+    /// Verify RSA signature of SHA512 hash using PKCS#1 v1.5 padding
+    /// Returns Ok(()) if signature is valid, Err otherwise
+    fn verify_signature(
+        &self,
+        signature_bytes: &[u8],
+        hash_hex: &str,
+    ) -> Result<(), ServiceError> {
+        // Decode the hex hash string to bytes
+        let hash_bytes = hex::decode(hash_hex)
+            .map_err(|e| ServiceError::IOError(std::io::Error::other(format!(
+                "Failed to decode hash hex string: {e}"
+            ))))?;
+
+        use rsa::traits::PublicKeyParts;
+        
+        // Get public key components
+        let n = self.pubkey.n();
+        let e = self.pubkey.e();
+        let key_size = (n.bits() + 7) / 8;
+        
+        if signature_bytes.len() != key_size {
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "Signature length {} does not match key size {}",
+                signature_bytes.len(),
+                key_size
+            ))));
+        }
+
+        // Convert signature to BigUint for RSA operation
+        let signature_biguint = rsa::BigUint::from_bytes_be(signature_bytes);
+        
+        // RSA signature verification: signature^e mod n should give us the padded hash
+        let padded = signature_biguint.modpow(e, n);
+        let padded_bytes = padded.to_bytes_be();
+        
+        // Ensure we have enough bytes (key size)
+        let mut full_padded = vec![0u8; key_size];
+        let offset = key_size.saturating_sub(padded_bytes.len());
+        full_padded[offset..].copy_from_slice(&padded_bytes);
+        let padded_bytes = full_padded;
+        
+        // Verify PKCS#1 v1.5 padding structure
+        // Format: 00 01 [at least 8 FF bytes] 00 [DER-encoded DigestInfo] [hash]
+        if padded_bytes.len() < 19 + hash_bytes.len() {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: decrypted value too short"
+            )));
+        }
+        
+        // Check for 00 01 prefix
+        if padded_bytes[0] != 0x00 || padded_bytes[1] != 0x01 {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: missing PKCS#1 v1.5 padding prefix"
+            )));
+        }
+        
+        // Find the 00 separator after FF padding
+        let mut sep_idx = 2;
+        while sep_idx < padded_bytes.len() && padded_bytes[sep_idx] == 0xFF {
+            sep_idx += 1;
+        }
+        
+        if sep_idx >= padded_bytes.len() || padded_bytes[sep_idx] != 0x00 {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: missing separator after padding"
+            )));
+        }
+        
+        // SHA-512 DigestInfo: 30 51 30 0d 06 09 60 86 48 01 65 03 04 02 03 05 00 04 40
+        let sha512_digest_info: &[u8] = &[
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40
+        ];
+        
+        let digest_start = sep_idx + 1;
+        if digest_start + sha512_digest_info.len() + hash_bytes.len() > padded_bytes.len() {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: not enough data for DigestInfo and hash"
+            )));
+        }
+        
+        // Verify DigestInfo
+        if &padded_bytes[digest_start..digest_start + sha512_digest_info.len()] != sha512_digest_info {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: DigestInfo mismatch (not SHA-512)"
+            )));
+        }
+        
+        // Extract and compare hash
+        let hash_start = digest_start + sha512_digest_info.len();
+        let extracted_hash = &padded_bytes[hash_start..hash_start + hash_bytes.len()];
+        
+        if extracted_hash != hash_bytes.as_slice() {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: hash mismatch"
+            )));
+        }
+
+        info!("Signature verification successful");
+        Ok(())
+    }
+
     pub async fn receive_btrfs_stream<R>(
         &self,
         _btrfs: &Btrfs,
@@ -689,6 +790,7 @@ impl Service {
         data: &Arc<RwLock<ServiceInner>>,
         btrfs: &Arc<Btrfs>,
         reader: R,
+        signature: Vec<u8>,
     ) -> Result<Option<String>, ServiceError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -774,6 +876,28 @@ impl Service {
             btrfs.subvolume_set_rw(subvolume_path.clone())?;
         }
 
+        // Extract and verify the SHA512 hash computed during streaming
+        // This MUST be done before calling the install script
+        let hash = hash_result.read().await;
+        let Some(hash_hex) = hash.as_deref() else {
+            debug!("update.btrfs.xz SHA512: (not yet available)");
+            // Try to delete the invalid subvolume right away
+            if let Err(e) = btrfs.subvolume_delete(subvolume_path.clone()) {
+                warn!("Failed to delete invalid subvolume {name}: {e}");
+            }
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Failed to compute SHA512 hash of update stream",
+            )));
+        };
+
+        info!("update.btrfs.xz SHA512: {hash_hex}");
+
+        // Verify signature before proceeding with installation
+        {
+            let data_guard = data.read().await;
+            data_guard.verify_signature(&signature, hash_hex)?;
+        }
+
         // If an install script is specified in the manifest run it now
         if let Some(install_script) = manifest.install_script() {
             info!("Running install script for the new deployment");
@@ -819,19 +943,6 @@ impl Service {
                 info!("Install script completed successfully");
             }
         }
-
-        //info!("Installed manifest version: {}", manifest.version);
-
-        // Extract and print the SHA512 hash computed during streaming
-        let hash = hash_result.read().await;
-        let Some(hash) = hash.as_deref() else {
-            debug!("update.btrfs.xz SHA512: (not yet available)");
-            return Err(ServiceError::IOError(std::io::Error::other(
-                "Failed to compute SHA512 hash of update stream",
-            )));
-        };
-
-        info!("update.btrfs.xz SHA512: {hash}");
 
         // Make the new subvolume the default for next boot
         btrfs.subvolume_set_default(subvol_id, &rootfs_path)?;
@@ -987,8 +1098,9 @@ impl Service {
                 continue 'check_req;
             };
 
-            // Collect CHANGELOG and process update.btrfs.xz
+            // Collect CHANGELOG, update.signature, and process update.btrfs.xz
             let mut changelog_content: Option<String> = None;
+            let mut signature_content: Option<Vec<u8>> = None;
 
             'update: while let Some(file) = entries.next().await {
                 match file {
@@ -1020,6 +1132,23 @@ impl Service {
                             }
                             info!("Read CHANGELOG file: {} bytes", content.len());
                             changelog_content = Some(content);
+                        } else if path_str == "update.signature" {
+                            debug!("Found update.signature");
+                            let mut content = Vec::new();
+                            let mut reader = BufReader::new(entry);
+                            if let Err(err) = reader.read_to_end(&mut content).await {
+                                error!("Failed to read update.signature: {}", err);
+                                data.read()
+                                    .await
+                                    .set_status(UpdateStatus::Failed {
+                                        source: source_desc.clone(),
+                                        error: format!("Failed to read update.signature: {}", err),
+                                    })
+                                    .await;
+                                continue 'check_req;
+                            }
+                            info!("Read update.signature file: {} bytes", content.len());
+                            signature_content = Some(content);
                         } else if path_str == "update.btrfs.xz" {
                             debug!("Found update.btrfs.xz");
                             let header = entry.header();
@@ -1054,6 +1183,7 @@ impl Service {
                                 config.clone(),
                                 &mut confirmation_rx,
                                 changelog_content.clone(),
+                                signature_content.clone(),
                                 update_stream,
                                 entry_size,
                                 source_desc.clone(),
@@ -1100,6 +1230,7 @@ impl Service {
         config: Config,
         confirmation_rx: &mut mpsc::Receiver<bool>,
         changelog_content: Option<String>,
+        signature_content: Option<Vec<u8>>,
         update_stream: Pin<Box<dyn AsyncRead + Send + Unpin>>,
         update_size: u64,
         source_desc: String,
@@ -1107,6 +1238,11 @@ impl Service {
         // Extract version from changelog for confirmation/details
         let changelog = changelog_content.ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other("CHANGELOG not found in archive"))
+        })?;
+
+        // Ensure signature is present
+        let signature = signature_content.ok_or_else(|| {
+            ServiceError::IOError(std::io::Error::other("update.signature not found in archive"))
         })?;
 
         let version = extract_version_from_changelog(&changelog);
@@ -1194,7 +1330,7 @@ impl Service {
         // Install using the stream (tar Entry -> xz -d -> btrfs receive)
         // Hash computation now happens inside install_update
         debug!("[PROGRESS] Starting install_update - stream should start being consumed");
-        let result = Self::install_update(data, btrfs, wrapped_stream).await;
+        let result = Self::install_update(data, btrfs, wrapped_stream, signature.clone()).await;
 
         // Update final status and clear old deployments only after successful installation
         let status = match result {

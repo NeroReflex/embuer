@@ -187,3 +187,35 @@ From the private key the public key must be generated in PEM format:
 openssl rsa -in private_key.pem -pubout -outform PEM -RSAPublicKey_out -out public_key_pkcs1.pem
 ```
 
+### Generating the signature
+
+In order for the install to be applied a valid signature for the included public key must be provided in the update package.
+
+```sh
+openssl dgst -sha512 -sign private_key.pem -out update.signature update.btrfs.xz
+```
+
+Note: Make sure the private key (private_key.pem) is in PKCS#1 format.
+If you have a PKCS#8 format key, you can convert it:
+
+```sh
+# If you have a PKCS#8 private key, convert it to PKCS#1:
+openssl rsa -in private_key_pkcs8.pem -out private_key.pem
+```
+
+To verify it works before packaging, you can test with:
+
+```sh
+openssl dgst -sha512 -verify public_key.pem -signature update.signature update.btrfs.xz
+```
+
+This should output "Verified OK" if the signature is valid.
+
+### Generating the package
+
+Once you have update.btrfs.xz, update.signature and CHANGELOG files you can generate the
+update package:
+
+```sh
+tar -cf update.tar CHANGELOG update.btrfs.xz update.signature
+```
