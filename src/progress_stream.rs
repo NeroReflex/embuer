@@ -18,7 +18,6 @@ pub struct ProgressReader<R> {
     total_size: Option<u64>,
     status_handle: Arc<RwLock<UpdateStatus>>,
     source: String,
-    is_installing: bool,
     last_update: std::time::Instant,
 }
 
@@ -28,7 +27,6 @@ impl<R: AsyncRead + Unpin> ProgressReader<R> {
         total_size: Option<u64>,
         status_handle: Arc<RwLock<UpdateStatus>>,
         source: String,
-        is_installing: bool,
     ) -> Self {
         Self {
             inner,
@@ -36,7 +34,6 @@ impl<R: AsyncRead + Unpin> ProgressReader<R> {
             total_size,
             status_handle,
             source,
-            is_installing,
             last_update: std::time::Instant::now(),
         }
     }
@@ -49,6 +46,7 @@ impl<R: AsyncRead + Unpin> ProgressReader<R> {
     }
 
     fn should_update(&self) -> bool {
+        // Update if 100ms has elapsed since last update
         self.last_update.elapsed().as_millis() > 100
     }
 }
@@ -64,21 +62,21 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
 
         if let Poll::Ready(Ok(())) = &result {
             let reader = self.get_mut();
-            reader.bytes_read += (buf.filled().len() - before) as u64;
+            let bytes_increment = (buf.filled().len() - before) as u64;
+            let was_zero = reader.bytes_read == 0;
+            reader.bytes_read += bytes_increment;
 
-            if reader.should_update() {
+            // Update immediately on first read to show progress has started
+            // Then continue updating every 100ms
+            if was_zero || reader.should_update() {
                 reader.last_update = std::time::Instant::now();
                 let progress = reader.calculate_progress();
                 let status_handle = reader.status_handle.clone();
                 let source = reader.source.clone();
-                let is_installing = reader.is_installing;
 
                 tokio::spawn(async move {
                     let mut status = status_handle.write().await;
-                    *status = match is_installing {
-                        true => UpdateStatus::Installing { source, progress },
-                        false => UpdateStatus::Downloading { source, progress },
-                    };
+                    *status = UpdateStatus::Installing { source, progress };
                 });
             }
         }

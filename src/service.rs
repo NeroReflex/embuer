@@ -905,12 +905,8 @@ impl Service {
                 UpdateSource::File(path) => path.display().to_string(),
             };
 
-            // Update status to Installing and at 0% progress
-            let status_handle = data.read().await.update_status.clone();
-            *status_handle.write().await = UpdateStatus::Installing {
-                source: source_desc.clone(),
-                progress: 0,
-            };
+            // Update status to Checking (will be set to Installing by ProgressReader when data flows)
+            data.read().await.set_status(UpdateStatus::Checking).await;
 
             // Prepare the archive object from the source
             info!("Fetching update archive contents...");
@@ -1153,27 +1149,21 @@ impl Service {
             }
         }
 
-        // Clear old deployments before installing new ones
-        data.read().await.set_status(UpdateStatus::Clearing).await;
-        match Self::clear_old_deployments(data, btrfs).await {
-            Ok(count) => {
-                info!("Cleared {} old deployments", count);
-            }
-            Err(err) => {
-                warn!("Failed to clear old deployments: {}", err);
-                // Continue with installation even if clearing fails
-            }
-        }
-
-        // Wrap stream with progress tracking
+        // Set status to Installing before wrapping stream so ProgressReader can update progress
         let status_handle = data.read().await.update_status.clone();
+        {
+            let mut status = status_handle.write().await;
+            *status = UpdateStatus::Installing {
+                source: source_desc.clone(),
+                progress: 0,
+            };
+        }
         let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = {
             let progress_reader = ProgressReader::new(
                 update_stream,
                 Some(update_size),
                 status_handle.clone(),
                 source_desc.clone(),
-                true,
             );
             Box::pin(progress_reader)
         };
@@ -1182,10 +1172,23 @@ impl Service {
         // Hash computation now happens inside install_update
         let result = Self::install_update(data, btrfs, wrapped_stream).await;
 
-        // Update final status
+        // Update final status and clear old deployments only after successful installation
         let status = match result {
             Ok(Some(deployment_name)) => {
                 info!("Update installed successfully: {deployment_name}");
+                
+                // Clear old deployments after successful installation (only once per update cycle)
+                data.read().await.set_status(UpdateStatus::Clearing).await;
+                match Self::clear_old_deployments(data, btrfs).await {
+                    Ok(count) => {
+                        info!("Cleared {} old deployments", count);
+                    }
+                    Err(err) => {
+                        warn!("Failed to clear old deployments: {}", err);
+                        // Non-fatal, continue
+                    }
+                }
+                
                 UpdateStatus::Completed {
                     source: source_desc.clone(),
                     deployment: deployment_name,
