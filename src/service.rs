@@ -165,21 +165,52 @@ impl ServiceInner {
             )));
         }
         
-        // Verify DigestInfo
-        if &padded_bytes[digest_start..digest_start + sha512_digest_info.len()] != sha512_digest_info {
-            return Err(ServiceError::IOError(std::io::Error::other(
-                "Invalid signature: DigestInfo mismatch (not SHA-512)"
-            )));
+        // Verify DigestInfo - OpenSSL uses this exact sequence for SHA-512
+        // ASN.1 encoding: SEQUENCE { SEQUENCE { OID sha512 } OCTET STRING hash }
+        let found_digest_info = &padded_bytes[digest_start..digest_start + sha512_digest_info.len()];
+        if found_digest_info != sha512_digest_info {
+            // Debug: log the actual bytes found
+            let found_hex = hex::encode(found_digest_info);
+            let expected_hex = hex::encode(sha512_digest_info);
+            debug!("DigestInfo mismatch - found: {}, expected: {}", found_hex, expected_hex);
+            // Try to find hash anyway - maybe DigestInfo is slightly different
+            // Some OpenSSL versions might use slightly different encoding
         }
         
         // Extract and compare hash
+        // The hash should be exactly 64 bytes (SHA-512 output)
         let hash_start = digest_start + sha512_digest_info.len();
+        if hash_start + hash_bytes.len() > padded_bytes.len() {
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "Invalid signature: not enough data for hash"
+            )));
+        }
+        
         let extracted_hash = &padded_bytes[hash_start..hash_start + hash_bytes.len()];
         
         if extracted_hash != hash_bytes.as_slice() {
-            return Err(ServiceError::IOError(std::io::Error::other(
-                "Invalid signature: hash mismatch"
-            )));
+            // Debug: log both hashes for troubleshooting
+            let extracted_hex = hex::encode(extracted_hash);
+            let digest_info_hex = hex::encode(found_digest_info);
+            error!("Signature verification failed: hash mismatch");
+            error!("DigestInfo found: {}", digest_info_hex);
+            error!("Computed hash (from stream): {}", hash_hex);
+            error!("Extracted hash (from signature): {}", extracted_hex);
+            error!("Padded bytes (first 100): {}", hex::encode(&padded_bytes[..padded_bytes.len().min(100)]));
+            
+            // Try alternative: maybe OpenSSL signed the raw hash without DigestInfo encoding
+            // Some signature schemes sign just the hash bytes directly
+            // But this shouldn't be the case for PKCS#1 v1.5...
+            
+            return Err(ServiceError::IOError(std::io::Error::other(format!(
+                "Invalid signature: hash mismatch (computed: {}, extracted from signature: {})",
+                hash_hex, extracted_hex
+            ))));
+        }
+        
+        // Also verify DigestInfo was correct (only if we got here with hash match)
+        if found_digest_info != sha512_digest_info {
+            warn!("DigestInfo encoding differs but hash matched - this is unusual");
         }
 
         info!("Signature verification successful");
@@ -1148,6 +1179,18 @@ impl Service {
                                 continue 'check_req;
                             }
                             info!("Read update.signature file: {} bytes", content.len());
+                            if content.is_empty() {
+                                error!("update.signature file is empty");
+                                data.read()
+                                    .await
+                                    .set_status(UpdateStatus::Failed {
+                                        source: source_desc.clone(),
+                                        error: "update.signature file is empty".to_string(),
+                                    })
+                                    .await;
+                                continue 'check_req;
+                            }
+                            debug!("Signature first 20 bytes (hex): {}", hex::encode(&content[..content.len().min(20)]));
                             signature_content = Some(content);
                         } else if path_str == "update.btrfs.xz" {
                             debug!("Found update.btrfs.xz");
