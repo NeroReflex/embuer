@@ -57,21 +57,35 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let filled = buf.filled().to_vec();
-        let before = filled.len();
+        // Record how much was filled before the read
+        let filled_before = buf.filled().len();
+        
+        // Perform the actual read
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
 
-        if let Poll::Ready(Ok(())) = &result {
-            // Update hasher with the newly read data
-            let newly_read = &filled[before..];
-            if !newly_read.is_empty() {
-                self.hasher.update(newly_read);
-            }
+        match &result {
+            Poll::Ready(Ok(())) => {
+                // Get the newly read data (everything that was filled after the read)
+                let filled_after = buf.filled();
+                if filled_after.len() > filled_before {
+                    let newly_read = &filled_after[filled_before..];
+                    if !newly_read.is_empty() {
+                        self.hasher.update(newly_read);
+                    }
+                }
 
-            // Check if we've reached EOF (no new data and buffer is at capacity)
-            if newly_read.is_empty() && buf.remaining() == 0 {
-                // Finalize the hash when stream ends
+                // Check if we've reached EOF (no new data read - means EOF was reached)
+                if filled_after.len() == filled_before {
+                    // Finalize the hash when stream ends (EOF)
+                    self.finalize_hash();
+                }
+            }
+            Poll::Ready(Err(_)) => {
+                // On error, finalize what we have
                 self.finalize_hash();
+            }
+            Poll::Pending => {
+                // Not ready yet, do nothing
             }
         }
 
