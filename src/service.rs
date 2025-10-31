@@ -178,17 +178,24 @@ impl ServiceInner {
                 })
             };
 
-            // Read stderr concurrently - capture all output for error diagnosis
+            // Read stderr concurrently - capture all output for error diagnosis and logging
             let stderr_task = tokio::spawn(async move {
                 let mut subvol_name: Option<String> = None;
                 let mut stderr_lines = Vec::new();
                 let mut lines = btrfs_stderr_reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let line_clone = line.clone();
-                    stderr_lines.push(line_clone);
+                    stderr_lines.push(line_clone.clone());
+                    // Log each stderr line for debugging
+                    debug!("btrfs receive stderr: {}", line_clone);
                     if let Some(name) = line.strip_prefix("At subvol ") {
                         subvol_name = Some(name.to_string());
                     }
+                }
+                // Log complete stderr output for debugging
+                if !stderr_lines.is_empty() {
+                    let stderr_text = stderr_lines.join("\n");
+                    info!("btrfs receive stderr output:\n{}", stderr_text);
                 }
                 (subvol_name, stderr_lines)
             });
@@ -217,19 +224,27 @@ impl ServiceInner {
                 let btrfs_status = match btrfs_res {
                     Ok(s) => s,
                     Err(e) => {
-                        error!("btrfs receive wait error: {e}");
                         let stderr_text = stderr_lines.join("\n");
+                        error!("btrfs receive wait error: {e}");
+                        if !stderr_text.is_empty() {
+                            error!("btrfs receive stderr: {stderr_text}");
+                        }
+                        // Return error without stderr in the message (stderr is logged separately)
                         return Err(ServiceError::IOError(std::io::Error::other(format!(
-                            "btrfs receive wait failed: {e}\nStderr: {stderr_text}",
+                            "btrfs receive wait failed: {e}",
                         ))));
                     }
                 };
 
                 if !btrfs_status.success() {
                     let stderr_text = stderr_lines.join("\n");
-                    error!("btrfs receive failed with status: {btrfs_status}\nStderr:\n{stderr_text}");
+                    error!("btrfs receive failed with status: {btrfs_status}");
+                    if !stderr_text.is_empty() {
+                        error!("btrfs receive stderr: {stderr_text}");
+                    }
+                    // Return error without stderr in the message (stderr is logged separately)
                     return Err(ServiceError::IOError(std::io::Error::other(format!(
-                        "btrfs receive failed with status: {btrfs_status}\nStderr:\n{stderr_text}",
+                        "btrfs receive failed with status: {btrfs_status}",
                     ))));
                 }
 
