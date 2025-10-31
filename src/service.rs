@@ -109,6 +109,11 @@ impl ServiceInner {
             ServiceError::IOError(std::io::Error::other("Failed to open stdout for xz"))
         })?;
 
+        // Wrap xz_stdout in BufReader, then box it to satisfy trait bounds
+        // BufReader makes the stream Unpin, and boxing as a trait object satisfies Send + 'static
+        let xz_stdout_reader: Pin<Box<dyn AsyncRead + Send + Unpin>> =
+            Box::pin(BufReader::new(xz_stdout)) as Pin<Box<dyn AsyncRead + Send + Unpin>>;
+
         // Pipe input stream -> xz stdin
         let input_to_xz = tokio::spawn(async move {
             match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
@@ -134,7 +139,7 @@ impl ServiceInner {
             // Run the xz command receiving the stream
             xz_proc.wait(),
             // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
-            btrfs.receive(&self.deployments_dir, xz_stdout)
+            btrfs.receive(&self.deployments_dir, xz_stdout_reader)
         );
 
         let Ok(_) = xz_input_task_res
