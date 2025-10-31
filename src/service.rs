@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -87,7 +87,7 @@ fn extract_version_from_changelog(changelog: &str) -> String {
 impl ServiceInner {
     pub async fn receive_btrfs_stream<R>(
         &self,
-        btrfs: &Btrfs,
+        _btrfs: &Btrfs,
         mut input_stream: R,
     ) -> Result<Option<String>, ServiceError>
     where
@@ -109,11 +109,6 @@ impl ServiceInner {
             ServiceError::IOError(std::io::Error::other("Failed to open stdout for xz"))
         })?;
 
-        // Wrap xz_stdout in BufReader, then box it to satisfy trait bounds
-        // BufReader makes the stream Unpin, and boxing as a trait object satisfies Send + 'static
-        let xz_stdout_reader: Pin<Box<dyn AsyncRead + Send + Unpin>> =
-            Box::pin(BufReader::new(xz_stdout)) as Pin<Box<dyn AsyncRead + Send + Unpin>>;
-
         // Pipe input stream -> xz stdin
         let input_to_xz = tokio::spawn(async move {
             match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
@@ -133,13 +128,107 @@ impl ServiceInner {
             }
         });
 
+        // Pipe xz stdout -> btrfs receive directly (avoiding Unpin requirement)
+        // We'll duplicate the btrfs receive logic here to handle ChildStdout properly
+        let deployments_dir = self.deployments_dir.clone();
+        let btrfs_task = {
+            let lossy_path = deployments_dir.as_os_str().to_string_lossy().to_string();
+            let mut btrfs_proc = tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("btrfs receive {lossy_path} -e 1>&2"))
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(ServiceError::IOError)?;
+
+            let mut btrfs_stdin = btrfs_proc.stdin.take().ok_or_else(|| {
+                ServiceError::IOError(std::io::Error::other(
+                    "Failed to open stdin for btrfs receive",
+                ))
+            })?;
+
+            let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
+                ServiceError::IOError(std::io::Error::other(
+                    "Failed to open stderr for btrfs receive",
+                ))
+            })?;
+
+            let btrfs_stderr_reader = BufReader::new(btrfs_stderr);
+
+            // Pipe xz_stdout -> btrfs_stdin (using pin! to handle non-Unpin type)
+            let pipe_task = {
+                let mut xz_stdout_pinned = Box::pin(xz_stdout);
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let Ok(copy_res) = tokio::io::copy(&mut *xz_stdout_pinned, &mut btrfs_stdin).await
+                        .inspect_err(|e| error!("Error piping data from xz to btrfs receive: {e}"))
+                    else {
+                        return;
+                    };
+                    let Ok(_) = btrfs_stdin.shutdown().await
+                        .inspect_err(|e| error!("Error closing btrfs receive stdin: {e}"))
+                    else {
+                        return;
+                    };
+                    debug!("Piped {} bytes from xz to btrfs receive", copy_res);
+                })
+            };
+
+            // Read stderr concurrently
+            let stderr_task = tokio::spawn(async move {
+                let mut subvol_name: Option<String> = None;
+                let mut lines = btrfs_stderr_reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(name) = line.strip_prefix("At subvol ") {
+                        subvol_name = Some(name.to_string());
+                        break;
+                    }
+                }
+                subvol_name
+            });
+
+            tokio::spawn(async move {
+                let (pipe_res, btrfs_res, stderr_res) =
+                    tokio::join!(pipe_task, btrfs_proc.wait(), stderr_task);
+                
+                let _ = pipe_res.inspect_err(|e| error!("btrfs pipe task join error: {e}"));
+                let btrfs_status = match btrfs_res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("btrfs receive wait error: {e}");
+                        return Err(ServiceError::IOError(std::io::Error::other(format!(
+                            "btrfs receive failed: {e}",
+                        ))));
+                    }
+                };
+                
+                let subvol_name = match stderr_res {
+                    Ok(name) => name,
+                    Err(e) => {
+                        error!("stderr read task join error: {e}");
+                        return Err(ServiceError::IOError(std::io::Error::other(format!(
+                            "reading stderr from btrfs receive failed",
+                        ))));
+                    }
+                };
+
+                if !btrfs_status.success() {
+                    return Err(ServiceError::IOError(std::io::Error::other(format!(
+                        "btrfs receive failed with status: {btrfs_status}",
+                    ))));
+                }
+
+                Ok(subvol_name)
+            })
+        };
+
         let (xz_input_task_res, xz_task_res, btrfs_task_res) = tokio::join!(
             // Copy bytes from incoming stream to xz
             input_to_xz,
             // Run the xz command receiving the stream
             xz_proc.wait(),
-            // Use btrfs namespace to receive the stream (xz stdout -> btrfs receive)
-            btrfs.receive(&self.deployments_dir, xz_stdout_reader)
+            // Pipe xz stdout -> btrfs receive
+            btrfs_task
         );
 
         let Ok(_) = xz_input_task_res
@@ -160,13 +249,14 @@ impl ServiceInner {
             ))));
         };
 
-        let Ok(subvolume_result) = btrfs_task_res
-            .as_ref()
-            .inspect_err(|e| error!("btrfs receive join error: {e}"))
-        else {
-            return Err(ServiceError::IOError(std::io::Error::other(format!(
-                "joining of btrfs receive failed",
-            ))));
+        let subvolume_result = match btrfs_task_res {
+            Ok(result) => result,
+            Err(e) => {
+                error!("btrfs receive join error: {e}");
+                return Err(ServiceError::IOError(std::io::Error::other(format!(
+                    "joining of btrfs receive failed",
+                ))));
+            }
         };
 
         // Wait for xz process to finish
@@ -178,7 +268,7 @@ impl ServiceInner {
 
         debug!("xz decompression completed successfully");
 
-        Ok(subvolume_result.clone())
+        subvolume_result
     }
 
     /// Set status helper
