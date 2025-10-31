@@ -57,12 +57,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let before = buf.filled().len();
+        let filled = buf.filled().to_vec();
+        let before = filled.len();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
 
         if let Poll::Ready(Ok(())) = &result {
             // Update hasher with the newly read data
-            let newly_read = &buf.filled()[before..];
+            let newly_read = &filled[before..];
             if !newly_read.is_empty() {
                 self.hasher.update(newly_read);
             }
