@@ -174,47 +174,58 @@ impl ServiceInner {
                 })
             };
 
-            // Read stderr concurrently
+            // Read stderr concurrently - capture all output for error diagnosis
             let stderr_task = tokio::spawn(async move {
                 let mut subvol_name: Option<String> = None;
+                let mut stderr_lines = Vec::new();
                 let mut lines = btrfs_stderr_reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    let line_clone = line.clone();
+                    stderr_lines.push(line_clone);
                     if let Some(name) = line.strip_prefix("At subvol ") {
                         subvol_name = Some(name.to_string());
-                        break;
                     }
                 }
-                subvol_name
+                (subvol_name, stderr_lines)
             });
 
             tokio::spawn(async move {
                 let (pipe_res, btrfs_res, stderr_res) =
                     tokio::join!(pipe_task, btrfs_proc.wait(), stderr_task);
                 
-                let _ = pipe_res.inspect_err(|e| error!("btrfs pipe task join error: {e}"));
+                // Get stderr output first for better error messages
+                let (subvol_name, stderr_lines) = match stderr_res {
+                    Ok((name, lines)) => (name, lines),
+                    Err(e) => {
+                        error!("stderr read task join error: {e}");
+                        return Err(ServiceError::IOError(std::io::Error::other(format!(
+                            "reading stderr from btrfs receive failed: {e}",
+                        ))));
+                    }
+                };
+
+                // Check pipe result - broken pipe is expected if btrfs receive fails early
+                let pipe_err = pipe_res.err();
+                if let Some(e) = pipe_err {
+                    warn!("btrfs pipe task error: {e} (may be expected if btrfs receive failed)");
+                }
+
                 let btrfs_status = match btrfs_res {
                     Ok(s) => s,
                     Err(e) => {
                         error!("btrfs receive wait error: {e}");
+                        let stderr_text = stderr_lines.join("\n");
                         return Err(ServiceError::IOError(std::io::Error::other(format!(
-                            "btrfs receive failed: {e}",
-                        ))));
-                    }
-                };
-                
-                let subvol_name = match stderr_res {
-                    Ok(name) => name,
-                    Err(e) => {
-                        error!("stderr read task join error: {e}");
-                        return Err(ServiceError::IOError(std::io::Error::other(format!(
-                            "reading stderr from btrfs receive failed",
+                            "btrfs receive wait failed: {e}\nStderr: {stderr_text}",
                         ))));
                     }
                 };
 
                 if !btrfs_status.success() {
+                    let stderr_text = stderr_lines.join("\n");
+                    error!("btrfs receive failed with status: {btrfs_status}\nStderr:\n{stderr_text}");
                     return Err(ServiceError::IOError(std::io::Error::other(format!(
-                        "btrfs receive failed with status: {btrfs_status}",
+                        "btrfs receive failed with status: {btrfs_status}\nStderr:\n{stderr_text}",
                     ))));
                 }
 
@@ -259,8 +270,17 @@ impl ServiceInner {
             }
         };
 
-        // Wait for xz process to finish
+        // Check xz status - but if btrfs receive failed, xz may have gotten SIGPIPE which is expected
         if !xz_status.success() {
+            // If btrfs receive failed, xz getting SIGPIPE (signal 13) is expected (broken pipe)
+            // On Unix, processes killed by signal exit with code 128 + signal_number
+            // So SIGPIPE (13) would be exit code 141, but tokio may report it differently
+            // If xz failed but btrfs receive also failed, btrfs receive is the root cause
+            if subvolume_result.is_err() {
+                warn!("xz decompressor failed (likely SIGPIPE) because btrfs receive failed - returning btrfs receive error");
+                return subvolume_result;
+            }
+            // Otherwise, xz failed independently
             return Err(ServiceError::IOError(std::io::Error::other(format!(
                 "xz decompressor failed with status: {xz_status}"
             ))));
