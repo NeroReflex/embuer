@@ -101,6 +101,7 @@ impl Btrfs {
         })?;
 
         // btrfs receive outputs to stderr (via 1>&2 redirection in command)
+        // We must read stderr concurrently to prevent the process from blocking
         let btrfs_stderr = btrfs_proc.stderr.take().ok_or_else(|| {
             ServiceError::IOError(std::io::Error::other(
                 "Failed to open stderr for btrfs receive",
@@ -130,7 +131,23 @@ impl Btrfs {
             info!("Piping data from xz to to btrfs receive succeeded: {copy_res} bytes copied");
         });
 
-        let (copy_task_res, btrfs_task_res) = tokio::join!(pipe_task, btrfs_proc.wait());
+        // Read stderr concurrently to capture the subvolume name and prevent blocking
+        let stderr_task = tokio::spawn(async move {
+            let mut subvol_name: Option<String> = None;
+            let mut lines = btrfs_stderr_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Parse line like "At subvol subvolname"
+                if let Some(name) = line.strip_prefix("At subvol ") {
+                    subvol_name = Some(name.to_string());
+                    break;
+                }
+            }
+            subvol_name
+        });
+
+        // Wait for all tasks: pipe data, wait for process, and read stderr
+        let (copy_task_res, btrfs_task_res, stderr_task_res) =
+            tokio::join!(pipe_task, btrfs_proc.wait(), stderr_task);
 
         let Ok(_) = copy_task_res
             .as_ref()
@@ -150,22 +167,24 @@ impl Btrfs {
             ))));
         };
 
+        // Get the subvolume name from stderr (may be None if not found)
+        let subvol_name = match stderr_task_res {
+            Ok(name) => name,
+            Err(e) => {
+                error!("stderr read task join error: {e}");
+                return Err(ServiceError::IOError(std::io::Error::other(format!(
+                    "reading stderr from btrfs receive failed",
+                ))));
+            }
+        };
+
         if !btrfs_status.success() {
             return Err(ServiceError::IOError(std::io::Error::other(format!(
                 "btrfs receive failed with status: {btrfs_status}",
             ))));
         }
 
-        // Get the parsed subvolume name from stderr (where btrfs receive outputs it)
-        let mut lines = btrfs_stderr_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            // Parse line like "At subvol subvolname"
-            if let Some(subvol_name) = line.strip_prefix("At subvol ") {
-                return Ok(Some(subvol_name.to_string()));
-            }
-        }
-
-        Ok(None)
+        Ok(subvol_name)
     }
 
     /// Check if the given directory is a btrfs subvolume.
