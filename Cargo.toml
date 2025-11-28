@@ -1,5 +1,6 @@
 [package]
 name = "embuer"
+license = "GPL-2.0-or-later"
 authors = ["Denis Benato <benato.denis96@gmail.com>"]
 version = "0.1.0"
 edition = "2021"

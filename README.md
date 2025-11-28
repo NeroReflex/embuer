@@ -4,7 +4,8 @@ Embuer is a fast, easy-to-use and quick to integrate update daemon especially su
 
 **Platform**: Linux-only (requires btrfs filesystem)
 
-This update daemon can download from a configured url, or prompted via DBus a file that will be used to install the update as a new subvolume in a preconfigured directory as a btrfs snapshot.
+This update daemon can download from a configured url, or prompted via DBus a file that will be used to install
+the update as a new subvolume in a preconfigured directory as a btrfs snapshot.
 
 The downloaded file is never written to the disk and will never be fitted entirely in RAM,
 making it suitable for operation in smaller CPUs: the update is streamed directly to the decompression
@@ -219,3 +220,6 @@ update package:
 ```sh
 tar -cf update.tar CHANGELOG update.btrfs.xz update.signature
 ```
+
+## License
+[GNU General Public License v2.0 or later](LICENSE.md)
