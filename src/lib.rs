@@ -28,6 +28,7 @@ pub mod manifest;
 pub mod progress_stream;
 pub mod service;
 pub mod status;
+pub mod core;
 
 use zbus::Error as ZError;
 

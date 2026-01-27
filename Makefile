@@ -58,6 +58,7 @@ install: build-release install-header
 	mkdir -p $(DESTDIR)/usr/bin/
 	install -m 755 target/release/embuer-service $(DESTDIR)/usr/bin/
 	install -m 755 target/release/embuer-client $(DESTDIR)/usr/bin/
+	install -m 755 target/release/embuer-installer $(DESTDIR)/usr/bin/
 	mkdir -p $(DESTDIR)/usr/lib/
 	install -m 644 target/release/libembuer.so $(DESTDIR)/usr/lib/
 	install -m 644 target/release/libembuer.a $(DESTDIR)/usr/lib/

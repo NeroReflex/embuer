@@ -21,6 +21,10 @@ path = "src/bin/embuer-client.rs"
 name = "test-signature"
 path = "src/bin/test-signature.rs"
 
+[[bin]]
+name = "embuer-installer"
+path = "src/bin/embuer-installer.rs"
+
 [dependencies]
 tokio = { version = "^1", features = ["macros", "rt-multi-thread", "sync", "signal", "time", "process"] }
 rsa = { version = "0.9.7", features = ["pem", "std", "u64_digit"] }
