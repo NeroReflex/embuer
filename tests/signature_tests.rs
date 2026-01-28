@@ -1,25 +1,28 @@
 /*
     embuer: an embedded software updater DBUS daemon and CLI interface
     Copyright (C) 2025  Denis Benato
-    
+
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
-    
+
     You should have received a copy of the GNU General Public License along
     with this program; if not, write to the Free Software Foundation, Inc.,
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
 use embuer::ServiceError;
-use rsa::{pkcs1::DecodeRsaPublicKey, pkcs1::EncodeRsaPublicKey, pkcs1::EncodeRsaPrivateKey, RsaPrivateKey, RsaPublicKey};
 use rsa::traits::PublicKeyParts;
+use rsa::{
+    pkcs1::DecodeRsaPublicKey, pkcs1::EncodeRsaPrivateKey, pkcs1::EncodeRsaPublicKey,
+    RsaPrivateKey, RsaPublicKey,
+};
 use sha2::{Digest, Sha512};
 use std::fs;
 use std::io::Read;
@@ -32,16 +35,17 @@ fn verify_signature(
     hash_hex: &str,
 ) -> Result<(), ServiceError> {
     // Decode the hex hash string to bytes
-    let hash_bytes = hex::decode(hash_hex)
-        .map_err(|e| ServiceError::IOError(std::io::Error::other(format!(
+    let hash_bytes = hex::decode(hash_hex).map_err(|e| {
+        ServiceError::IOError(std::io::Error::other(format!(
             "Failed to decode hash hex string: {e}"
-        ))))?;
+        )))
+    })?;
 
     // Get public key components
     let n = pubkey.n();
     let e = pubkey.e();
     let key_size = (n.bits() + 7) / 8;
-    
+
     if signature_bytes.len() != key_size {
         return Err(ServiceError::IOError(std::io::Error::other(format!(
             "Signature length {} does not match key size {}",
@@ -52,79 +56,80 @@ fn verify_signature(
 
     // Convert signature to BigUint for RSA operation
     let signature_biguint = rsa::BigUint::from_bytes_be(signature_bytes);
-    
+
     // RSA signature verification: signature^e mod n should give us the padded hash
     let padded = signature_biguint.modpow(e, n);
     let padded_bytes = padded.to_bytes_be();
-    
+
     // Ensure we have enough bytes (key size)
     let mut full_padded = vec![0u8; key_size];
     let offset = key_size.saturating_sub(padded_bytes.len());
     full_padded[offset..].copy_from_slice(&padded_bytes);
     let padded_bytes = full_padded;
-    
+
     // Verify PKCS#1 v1.5 padding structure
     if padded_bytes.len() < 19 + hash_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: decrypted value too short"
+            "Invalid signature: decrypted value too short",
         )));
     }
-    
+
     // Check for 00 01 prefix
     if padded_bytes[0] != 0x00 || padded_bytes[1] != 0x01 {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: missing PKCS#1 v1.5 padding prefix"
+            "Invalid signature: missing PKCS#1 v1.5 padding prefix",
         )));
     }
-    
+
     // Find the 00 separator after FF padding
     let mut sep_idx = 2;
     while sep_idx < padded_bytes.len() && padded_bytes[sep_idx] == 0xFF {
         sep_idx += 1;
     }
-    
+
     if sep_idx >= padded_bytes.len() || padded_bytes[sep_idx] != 0x00 {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: missing separator after padding"
+            "Invalid signature: missing separator after padding",
         )));
     }
-    
+
     // SHA-512 DigestInfo
     let sha512_digest_info: &[u8] = &[
-        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40
+        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+        0x05, 0x00, 0x04, 0x40,
     ];
-    
+
     let digest_start = sep_idx + 1;
     if digest_start + sha512_digest_info.len() + hash_bytes.len() > padded_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: not enough data for DigestInfo and hash"
+            "Invalid signature: not enough data for DigestInfo and hash",
         )));
     }
-    
+
     // Verify DigestInfo
     let found_digest_info = &padded_bytes[digest_start..digest_start + sha512_digest_info.len()];
     if found_digest_info != sha512_digest_info {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: DigestInfo mismatch (not SHA-512)"
+            "Invalid signature: DigestInfo mismatch (not SHA-512)",
         )));
     }
-    
+
     // Extract and compare hash
     let hash_start = digest_start + sha512_digest_info.len();
     if hash_start + hash_bytes.len() > padded_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: not enough data for hash"
+            "Invalid signature: not enough data for hash",
         )));
     }
-    
+
     let extracted_hash = &padded_bytes[hash_start..hash_start + hash_bytes.len()];
-    
+
     if extracted_hash != hash_bytes.as_slice() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: hash mismatch"
+            "Invalid signature: hash mismatch",
         )));
     }
-    
+
     Ok(())
 }
 
@@ -133,7 +138,7 @@ fn compute_sha512(file_path: &std::path::Path) -> String {
     let mut file = fs::File::open(file_path).unwrap();
     let mut hasher = Sha512::new();
     let mut buffer = [0u8; 8192];
-    
+
     loop {
         let n = file.read(&mut buffer).unwrap();
         if n == 0 {
@@ -141,7 +146,7 @@ fn compute_sha512(file_path: &std::path::Path) -> String {
         }
         hasher.update(&buffer[..n]);
     }
-    
+
     hex::encode(hasher.finalize())
 }
 
@@ -169,7 +174,15 @@ fn test_signature_verification_valid() {
 
     // Sign with OpenSSL
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha512", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha512",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
@@ -177,14 +190,19 @@ fn test_signature_verification_valid() {
     let hash = compute_sha512(&test_file);
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature
     let result = verify_signature(&pub_key_loaded, &signature_bytes, &hash);
-    assert!(result.is_ok(), "Signature verification should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Signature verification should succeed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -211,22 +229,34 @@ fn test_signature_verification_wrong_hash() {
 
     // Sign with OpenSSL
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha512", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha512",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
     // Use wrong hash (hash of different content)
-    let wrong_hash = "a" .repeat(128); // Wrong hash (should be 128 hex chars = 64 bytes)
+    let wrong_hash = "a".repeat(128); // Wrong hash (should be 128 hex chars = 64 bytes)
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature - should fail
     let result = verify_signature(&pub_key_loaded, &signature_bytes, &wrong_hash);
-    assert!(result.is_err(), "Signature verification should fail with wrong hash");
+    assert!(
+        result.is_err(),
+        "Signature verification should fail with wrong hash"
+    );
     assert!(result.unwrap_err().to_string().contains("hash mismatch"));
 }
 
@@ -251,28 +281,42 @@ fn test_signature_verification_wrong_key() {
 
     // Sign with OpenSSL
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha512", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha512",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
     // Generate a different key pair for verification
     let wrong_priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
     let wrong_pub_key = wrong_priv_key.to_public_key();
-    let wrong_pub_pem = wrong_pub_key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
+    let wrong_pub_pem = wrong_pub_key
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .unwrap();
     fs::write(&wrong_pub_file, wrong_pub_pem).unwrap();
 
     // Compute hash
     let hash = compute_sha512(&test_file);
 
     // Load wrong public key
-    let wrong_pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&wrong_pub_file).unwrap()).unwrap();
+    let wrong_pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&wrong_pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature - should fail
     let result = verify_signature(&wrong_pub_key_loaded, &signature_bytes, &hash);
-    assert!(result.is_err(), "Signature verification should fail with wrong key");
+    assert!(
+        result.is_err(),
+        "Signature verification should fail with wrong key"
+    );
 }
 
 #[test]
@@ -299,7 +343,15 @@ fn test_signature_verification_empty_file() {
 
     // Sign with OpenSSL
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha512", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha512",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
@@ -307,14 +359,18 @@ fn test_signature_verification_empty_file() {
     let hash = compute_sha512(&test_file);
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature - should work even with empty file
     let result = verify_signature(&pub_key_loaded, &signature_bytes, &hash);
-    assert!(result.is_ok(), "Signature verification should succeed even with empty file");
+    assert!(
+        result.is_ok(),
+        "Signature verification should succeed even with empty file"
+    );
 }
 
 #[test]
@@ -342,7 +398,15 @@ fn test_signature_verification_large_file() {
 
     // Sign with OpenSSL
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha512", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha512",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
@@ -350,14 +414,18 @@ fn test_signature_verification_large_file() {
     let hash = compute_sha512(&test_file);
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature
     let result = verify_signature(&pub_key_loaded, &signature_bytes, &hash);
-    assert!(result.is_ok(), "Signature verification should succeed with large file");
+    assert!(
+        result.is_ok(),
+        "Signature verification should succeed with large file"
+    );
 }
 
 #[test]
@@ -385,14 +453,18 @@ fn test_signature_verification_corrupted_signature() {
     let hash = compute_sha512(&test_file);
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Create corrupted signature (wrong size)
     let corrupted_sig = vec![0u8; 256]; // All zeros
 
     // Verify signature - should fail
     let result = verify_signature(&pub_key_loaded, &corrupted_sig, &hash);
-    assert!(result.is_err(), "Signature verification should fail with corrupted signature");
+    assert!(
+        result.is_err(),
+        "Signature verification should fail with corrupted signature"
+    );
 }
 
 #[test]
@@ -410,15 +482,22 @@ fn test_signature_verification_wrong_size() {
     fs::write(&pub_file, pub_pem).unwrap();
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Create signature with wrong size
     let wrong_size_sig = vec![0u8; 128]; // Too small for 2048-bit key (should be 256 bytes)
 
     // Verify signature - should fail
     let result = verify_signature(&pub_key_loaded, &wrong_size_sig, "a".repeat(128).as_str());
-    assert!(result.is_err(), "Signature verification should fail with wrong signature size");
-    assert!(result.unwrap_err().to_string().contains("does not match key size"));
+    assert!(
+        result.is_err(),
+        "Signature verification should fail with wrong signature size"
+    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("does not match key size"));
 }
 
 #[test]
@@ -445,7 +524,15 @@ fn test_signature_verification_mismatched_digest() {
 
     // Sign with SHA-256 instead of SHA-512 (should fail verification)
     std::process::Command::new("openssl")
-        .args(&["dgst", "-sha256", "-sign", key_file.to_str().unwrap(), "-out", sig_file.to_str().unwrap(), test_file.to_str().unwrap()])
+        .args(&[
+            "dgst",
+            "-sha256",
+            "-sign",
+            key_file.to_str().unwrap(),
+            "-out",
+            sig_file.to_str().unwrap(),
+            test_file.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to sign with OpenSSL");
 
@@ -453,13 +540,16 @@ fn test_signature_verification_mismatched_digest() {
     let hash = compute_sha512(&test_file);
 
     // Load public key
-    let pub_key_loaded = RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
+    let pub_key_loaded =
+        RsaPublicKey::from_pkcs1_pem(&fs::read_to_string(&pub_file).unwrap()).unwrap();
 
     // Read signature
     let signature_bytes = fs::read(&sig_file).unwrap();
 
     // Verify signature - should fail because signature uses SHA-256 but we expect SHA-512
     let result = verify_signature(&pub_key_loaded, &signature_bytes, &hash);
-    assert!(result.is_err(), "Signature verification should fail with SHA-256 signature when expecting SHA-512");
+    assert!(
+        result.is_err(),
+        "Signature verification should fail with SHA-256 signature when expecting SHA-512"
+    );
 }
-

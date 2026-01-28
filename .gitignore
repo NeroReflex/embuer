@@ -1,2 +1,6 @@
 /target
 **/embuer.h
+*.img
+
+/docker-build-out
+

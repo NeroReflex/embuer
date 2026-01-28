@@ -2,14 +2,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use log::{debug, warn, error, info};
+use log::{debug, error, info, warn};
 use rsa::RsaPublicKey;
-use tokio::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 
-use crate::ServiceError;
 use crate::btrfs::Btrfs;
 use crate::hash_stream::HashingReader;
+use crate::ServiceError;
 
 /// Verify RSA signature of SHA512 hash using PKCS#1 v1.5 padding
 /// Returns Ok(()) if signature is valid, Err otherwise
@@ -19,18 +19,19 @@ pub fn verify_signature(
     hash_hex: &str,
 ) -> Result<(), ServiceError> {
     // Decode the hex hash string to bytes
-    let hash_bytes = hex::decode(hash_hex)
-        .map_err(|e| ServiceError::IOError(std::io::Error::other(format!(
+    let hash_bytes = hex::decode(hash_hex).map_err(|e| {
+        ServiceError::IOError(std::io::Error::other(format!(
             "Failed to decode hash hex string: {e}"
-        ))))?;
+        )))
+    })?;
 
     use rsa::traits::PublicKeyParts;
-    
+
     // Get public key components
     let n = pubkey.n();
     let e = pubkey.e();
     let key_size = (n.bits() + 7) / 8;
-    
+
     if signature_bytes.len() != key_size {
         return Err(ServiceError::IOError(std::io::Error::other(format!(
             "Signature length {} does not match key size {}",
@@ -41,56 +42,57 @@ pub fn verify_signature(
 
     // Convert signature to BigUint for RSA operation
     let signature_biguint = rsa::BigUint::from_bytes_be(signature_bytes);
-    
+
     // RSA signature verification: signature^e mod n should give us the padded hash
     let padded = signature_biguint.modpow(e, n);
     let padded_bytes = padded.to_bytes_be();
-    
+
     // Ensure we have enough bytes (key size)
     let mut full_padded = vec![0u8; key_size];
     let offset = key_size.saturating_sub(padded_bytes.len());
     full_padded[offset..].copy_from_slice(&padded_bytes);
     let padded_bytes = full_padded;
-    
+
     // Verify PKCS#1 v1.5 padding structure
     // Format: 00 01 [at least 8 FF bytes] 00 [DER-encoded DigestInfo] [hash]
     if padded_bytes.len() < 19 + hash_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: decrypted value too short"
+            "Invalid signature: decrypted value too short",
         )));
     }
-    
+
     // Check for 00 01 prefix
     if padded_bytes[0] != 0x00 || padded_bytes[1] != 0x01 {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: missing PKCS#1 v1.5 padding prefix"
+            "Invalid signature: missing PKCS#1 v1.5 padding prefix",
         )));
     }
-    
+
     // Find the 00 separator after FF padding
     let mut sep_idx = 2;
     while sep_idx < padded_bytes.len() && padded_bytes[sep_idx] == 0xFF {
         sep_idx += 1;
     }
-    
+
     if sep_idx >= padded_bytes.len() || padded_bytes[sep_idx] != 0x00 {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: missing separator after padding"
+            "Invalid signature: missing separator after padding",
         )));
     }
-    
+
     // SHA-512 DigestInfo: 30 51 30 0d 06 09 60 86 48 01 65 03 04 02 03 05 00 04 40
     let sha512_digest_info: &[u8] = &[
-        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40
+        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+        0x05, 0x00, 0x04, 0x40,
     ];
-    
+
     let digest_start = sep_idx + 1;
     if digest_start + sha512_digest_info.len() + hash_bytes.len() > padded_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: not enough data for DigestInfo and hash"
+            "Invalid signature: not enough data for DigestInfo and hash",
         )));
     }
-    
+
     // Verify DigestInfo - OpenSSL uses this exact sequence for SHA-512
     // ASN.1 encoding: SEQUENCE { SEQUENCE { OID sha512 } OCTET STRING hash }
     let found_digest_info = &padded_bytes[digest_start..digest_start + sha512_digest_info.len()];
@@ -98,22 +100,25 @@ pub fn verify_signature(
         // Debug: log the actual bytes found
         let found_hex = hex::encode(found_digest_info);
         let expected_hex = hex::encode(sha512_digest_info);
-        debug!("DigestInfo mismatch - found: {}, expected: {}", found_hex, expected_hex);
+        debug!(
+            "DigestInfo mismatch - found: {}, expected: {}",
+            found_hex, expected_hex
+        );
         // Try to find hash anyway - maybe DigestInfo is slightly different
         // Some OpenSSL versions might use slightly different encoding
     }
-    
+
     // Extract and compare hash
     // The hash should be exactly 64 bytes (SHA-512 output)
     let hash_start = digest_start + sha512_digest_info.len();
     if hash_start + hash_bytes.len() > padded_bytes.len() {
         return Err(ServiceError::IOError(std::io::Error::other(
-            "Invalid signature: not enough data for hash"
+            "Invalid signature: not enough data for hash",
         )));
     }
-    
+
     let extracted_hash = &padded_bytes[hash_start..hash_start + hash_bytes.len()];
-    
+
     if extracted_hash != hash_bytes.as_slice() {
         // Debug: log both hashes for troubleshooting
         let extracted_hex = hex::encode(extracted_hash);
@@ -122,18 +127,21 @@ pub fn verify_signature(
         error!("DigestInfo found: {}", digest_info_hex);
         error!("Computed hash (from stream): {}", hash_hex);
         error!("Extracted hash (from signature): {}", extracted_hex);
-        error!("Padded bytes (first 100): {}", hex::encode(&padded_bytes[..padded_bytes.len().min(100)]));
-        
+        error!(
+            "Padded bytes (first 100): {}",
+            hex::encode(&padded_bytes[..padded_bytes.len().min(100)])
+        );
+
         // Try alternative: maybe OpenSSL signed the raw hash without DigestInfo encoding
         // Some signature schemes sign just the hash bytes directly
         // But this shouldn't be the case for PKCS#1 v1.5...
-        
+
         return Err(ServiceError::IOError(std::io::Error::other(format!(
             "Invalid signature: hash mismatch (computed: {}, extracted from signature: {})",
             hash_hex, extracted_hex
         ))));
     }
-    
+
     // Also verify DigestInfo was correct (only if we got here with hash match)
     if found_digest_info != sha512_digest_info {
         warn!("DigestInfo encoding differs but hash matched - this is unusual");
@@ -167,12 +175,17 @@ where
     })?;
 
     // Pipe input stream -> xz stdin
-    debug!("[PROGRESS] receive_btrfs_stream: Starting to pipe data from ProgressReader -> xz -> btrfs");
+    debug!(
+        "[PROGRESS] receive_btrfs_stream: Starting to pipe data from ProgressReader -> xz -> btrfs"
+    );
     let input_to_xz = tokio::spawn(async move {
         debug!("[PROGRESS] input_to_xz task: Starting tokio::io::copy - this should trigger ProgressReader::poll_read");
         match tokio::io::copy(&mut input_stream, &mut xz_stdin).await {
             Ok(bytes) => {
-                debug!("[PROGRESS] input_to_xz task: Piped {} bytes to xz decompressor", bytes);
+                debug!(
+                    "[PROGRESS] input_to_xz task: Piped {} bytes to xz decompressor",
+                    bytes
+                );
             }
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                 warn!("Broken pipe while sending to xz (xz may have finished early)");
@@ -221,12 +234,15 @@ where
             let mut xz_stdout_pinned = Box::pin(xz_stdout);
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
-                let Ok(copy_res) = tokio::io::copy(&mut *xz_stdout_pinned, &mut btrfs_stdin).await
+                let Ok(copy_res) = tokio::io::copy(&mut *xz_stdout_pinned, &mut btrfs_stdin)
+                    .await
                     .inspect_err(|e| error!("Error piping data from xz to btrfs receive: {e}"))
                 else {
                     return;
                 };
-                let Ok(_) = btrfs_stdin.shutdown().await
+                let Ok(_) = btrfs_stdin
+                    .shutdown()
+                    .await
                     .inspect_err(|e| error!("Error closing btrfs receive stdin: {e}"))
                 else {
                     return;
@@ -260,7 +276,7 @@ where
         tokio::spawn(async move {
             let (pipe_res, btrfs_res, stderr_res) =
                 tokio::join!(pipe_task, btrfs_proc.wait(), stderr_task);
-            
+
             // Get stderr output first for better error messages
             let (subvol_name, stderr_lines) = match stderr_res {
                 Ok((name, lines)) => (name, lines),
@@ -387,13 +403,12 @@ where
 
     debug!("[PROGRESS] install_update: Calling receive_btrfs_stream - stream consumption should start now");
     let subvolume = receive_btrfs_stream(
-            deployments_dir.clone(),
-            Box::pin(hashing_reader) as Pin<Box<dyn AsyncRead + Send + Unpin>>,
-        )
-        .await?;
-    let name = subvolume.ok_or_else(|| {
-        ServiceError::IOError(std::io::Error::other("No subvolume name found"))
-    })?;
+        deployments_dir.clone(),
+        Box::pin(hashing_reader) as Pin<Box<dyn AsyncRead + Send + Unpin>>,
+    )
+    .await?;
+    let name = subvolume
+        .ok_or_else(|| ServiceError::IOError(std::io::Error::other("No subvolume name found")))?;
 
     info!("Received subvolume: {name}");
     let rootfs_path = rootfs_dir.clone();

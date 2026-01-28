@@ -1,17 +1,17 @@
 /*
     embuer: an embedded software updater DBUS daemon and CLI interface
     Copyright (C) 2025  Denis Benato
-    
+
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
-    
+
     You should have received a copy of the GNU General Public License along
     with this program; if not, write to the Free Software Foundation, Inc.,
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
@@ -460,6 +460,25 @@ impl Btrfs {
         )))
     }
 
+    /// Create a btrfs subvolume.
+    ///
+    /// This method creates the specified subvolume.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the subvolume to delete
+    ///
+    /// Returns `Ok(())` on success.
+    /// Returns an error if the command fails.
+    pub fn subvolume_create<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> Result<String, ServiceError> {
+        let path_ref = path.as_ref();
+
+        Ok(self.run_and_get_stdout(["subvolume", "create", &path_ref.to_string_lossy()])?)
+    }
+
     /// Delete a btrfs subvolume.
     ///
     /// This method deletes the specified subvolume. The subvolume must
@@ -471,12 +490,12 @@ impl Btrfs {
     ///
     /// Returns `Ok(())` on success.
     /// Returns an error if the command fails.
-    pub fn subvolume_delete<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), ServiceError> {
+    pub fn subvolume_delete<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> Result<String, ServiceError> {
         let path_ref = path.as_ref();
-
-        self.run_and_get_stdout(["subvolume", "delete", &path_ref.to_string_lossy()])?;
-
-        Ok(())
+        Ok(self.run_and_get_stdout(["subvolume", "delete", &path_ref.to_string_lossy()])?)
     }
 
     /// List all deployment subvolumes in the deployments directory.

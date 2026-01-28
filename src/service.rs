@@ -1,24 +1,24 @@
 /*
     embuer: an embedded software updater DBUS daemon and CLI interface
     Copyright (C) 2025  Denis Benato
-    
+
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
-    
+
     You should have received a copy of the GNU General Public License along
     with this program; if not, write to the Free Software Foundation, Inc.,
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+use crate::core::{install_update, receive_btrfs_stream};
 use crate::progress_stream::ProgressReader;
-use crate::core::{receive_btrfs_stream, verify_signature, install_update};
 use crate::status::UpdateStatus;
 use crate::{btrfs::Btrfs, config::Config, ServiceError};
 use futures::TryStreamExt;
@@ -104,16 +104,6 @@ fn extract_version_from_changelog(changelog: &str) -> String {
 }
 
 impl ServiceInner {
-    /// Verify RSA signature of SHA512 hash using PKCS#1 v1.5 padding
-    /// Returns Ok(()) if signature is valid, Err otherwise
-    fn verify_signature(
-        &self,
-        signature_bytes: &[u8],
-        hash_hex: &str,
-    ) -> Result<(), ServiceError> {
-        verify_signature(&self.pubkey, signature_bytes, hash_hex)
-    }
-
     pub async fn receive_btrfs_stream<R>(
         &self,
         _btrfs: &Btrfs,
@@ -506,19 +496,19 @@ impl Service {
         signature: Vec<u8>,
     ) -> Result<Option<String>, ServiceError>
     where
-    R: AsyncRead + Unpin + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
     {
-        let (pubkey, rootfs_dir, deployments_dir, boot_name,) = {
+        let (pubkey, rootfs_dir, deployments_dir, boot_name) = {
             let data_lck = data.read().await;
 
             (
                 data_lck.pubkey.clone(),
                 data_lck.rootfs_dir.clone(),
                 data_lck.deployments_dir.clone(),
-                data_lck.boot_name.clone()
+                data_lck.boot_name.clone(),
             )
         };
-        
+
         install_update(
             &pubkey,
             rootfs_dir.clone(),
@@ -527,7 +517,8 @@ impl Service {
             btrfs,
             reader,
             signature,
-        ).await
+        )
+        .await
     }
 
     /// Extract changelog and update stream from URL
@@ -737,7 +728,10 @@ impl Service {
                                     .await;
                                 continue 'check_req;
                             }
-                            debug!("Signature first 20 bytes (hex): {}", hex::encode(&content[..content.len().min(20)]));
+                            debug!(
+                                "Signature first 20 bytes (hex): {}",
+                                hex::encode(&content[..content.len().min(20)])
+                            );
                             signature_content = Some(content);
                         } else if path_str == "update.btrfs.xz" {
                             debug!("Found update.btrfs.xz");
@@ -832,7 +826,9 @@ impl Service {
 
         // Ensure signature is present
         let signature = signature_content.ok_or_else(|| {
-            ServiceError::IOError(std::io::Error::other("update.signature not found in archive"))
+            ServiceError::IOError(std::io::Error::other(
+                "update.signature not found in archive",
+            ))
         })?;
 
         let version = extract_version_from_changelog(&changelog);
@@ -900,14 +896,20 @@ impl Service {
         let status_handle = data.read().await.update_status.clone();
         {
             let mut status = status_handle.write().await;
-            debug!("[PROGRESS] Setting status to Installing with progress 0% (update_size: {})", update_size);
+            debug!(
+                "[PROGRESS] Setting status to Installing with progress 0% (update_size: {})",
+                update_size
+            );
             *status = UpdateStatus::Installing {
                 source: source_desc.clone(),
                 progress: 0,
             };
         }
         let wrapped_stream: Pin<Box<dyn AsyncRead + Send + Unpin>> = {
-            debug!("[PROGRESS] Creating ProgressReader with total_size: {:?}", Some(update_size));
+            debug!(
+                "[PROGRESS] Creating ProgressReader with total_size: {:?}",
+                Some(update_size)
+            );
             let progress_reader = ProgressReader::new(
                 update_stream,
                 Some(update_size),
@@ -926,7 +928,7 @@ impl Service {
         let status = match result {
             Ok(Some(deployment_name)) => {
                 info!("Update installed successfully: {deployment_name}");
-                
+
                 // Clear old deployments after successful installation (only once per update cycle)
                 data.read().await.set_status(UpdateStatus::Clearing).await;
                 match Self::clear_old_deployments(data, btrfs).await {
@@ -938,7 +940,7 @@ impl Service {
                         // Non-fatal, continue
                     }
                 }
-                
+
                 UpdateStatus::Completed {
                     source: source_desc.clone(),
                     deployment: deployment_name,

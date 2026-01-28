@@ -1,17 +1,17 @@
 /*
     embuer: an embedded software updater DBUS daemon and CLI interface
     Copyright (C) 2025  Denis Benato
-    
+
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
-    
+
     You should have received a copy of the GNU General Public License along
     with this program; if not, write to the Free Software Foundation, Inc.,
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
@@ -47,7 +47,11 @@ impl<R: AsyncRead + Unpin> ProgressReader<R> {
         status_handle: Arc<RwLock<UpdateStatus>>,
         source: String,
     ) -> Self {
-        log::debug!("[PROGRESS] ProgressReader::new: total_size={:?}, source={}", total_size, source);
+        log::debug!(
+            "[PROGRESS] ProgressReader::new: total_size={:?}, source={}",
+            total_size,
+            source
+        );
         Self {
             inner,
             bytes_read: 0,
@@ -78,7 +82,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let before = buf.filled().len();
-        log::debug!("[PROGRESS] ProgressReader::poll_read called: before={}, capacity={}", before, buf.capacity());
+        log::debug!(
+            "[PROGRESS] ProgressReader::poll_read called: before={}, capacity={}",
+            before,
+            buf.capacity()
+        );
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
 
         if let Poll::Ready(Ok(())) = &result {
@@ -123,9 +131,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
                 );
             }
         } else if let Poll::Ready(Err(ref e)) = &result {
-            log::warn!("[PROGRESS] ProgressReader::poll_read: Error from inner reader: {}", e);
+            log::warn!(
+                "[PROGRESS] ProgressReader::poll_read: Error from inner reader: {}",
+                e
+            );
         } else {
-            log::debug!("[PROGRESS] ProgressReader::poll_read: Poll::Pending - waiting for more data");
+            log::debug!(
+                "[PROGRESS] ProgressReader::poll_read: Poll::Pending - waiting for more data"
+            );
         }
 
         result
