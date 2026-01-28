@@ -254,7 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let base_mount_path = std::path::PathBuf::from(format!("/mnt/embuer"));
+    let base_mount_path = std::env::temp_dir().join("embuer_mnt");
     std::fs::create_dir_all(&base_mount_path)?;
 
     // Mount ESP partition
