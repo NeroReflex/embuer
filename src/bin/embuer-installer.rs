@@ -50,7 +50,11 @@ struct EmbuerInstallCli {
     #[argh(option, description = "image file size if creating a new one (in GiB)")]
     pub image_size: Option<usize>,
 
-    #[argh(option, description = "source of the deployment: either URL, file or manual for a manual (or scripted) installation", short = 's')]
+    #[argh(
+        option,
+        description = "source of the deployment: either URL, file or manual for a manual (or scripted) installation",
+        short = 's'
+    )]
     pub deployment_source: String,
 
     #[argh(option, description = "name of the deployment", short = 'k')]
@@ -396,6 +400,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
 
+            // If a manual kernel source was specified, build and install it now
+            if let Some(kernel_src) = cli.manual_kernel.as_ref() {
+                info!(
+                    "Manual kernel specified: building and installing from {}",
+                    kernel_src
+                );
+                let kernel_path = std::path::Path::new(kernel_src);
+                manual_kernel(
+                    kernel_path,
+                    cli.manual_kernel_arch.as_deref(),
+                    cli.manual_kernel_defconfig.as_deref(),
+                    &deployment_rootfs_dir,
+                )
+                .await?;
+            }
+
             match &cli.manual_script {
                 Some(script_path) => {
                     info!("Executing manual installation script: {}", script_path);
@@ -568,10 +588,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn manual_kernel(
+    source_dir: &std::path::Path,
+    arch: Option<&str>,
+    defconfig: Option<&str>,
+    deployment_rootfs_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    build_kernel_manual(source_dir, arch, defconfig).await?;
+    install_kernel_manual(source_dir, arch, deployment_rootfs_dir).await?;
+
+    Ok(())
+}
+
 async fn kernel_cmd(
     source_dir: &std::path::Path,
     arch: Option<&str>,
-    args: &[&str]
+    args: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     Command::new("make")
         .current_dir(source_dir)
@@ -582,7 +614,7 @@ async fn kernel_cmd(
         .status()
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    
+
     Ok(())
 }
 
@@ -591,8 +623,32 @@ async fn build_kernel_manual(
     arch: Option<&str>,
     defconfig: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: implement kernel building and issue make all and make bzImage commands
-    
+    // Clean the tree
+    kernel_cmd(source_dir, arch, &["mrproper"]).await?;
+
+    // Configure: prefer provided defconfig, then existing .config, otherwise run defconfig
+    if let Some(defc) = defconfig {
+        kernel_cmd(source_dir, arch, &[defc]).await?;
+    } else if !source_dir.join(".config").exists() {
+        kernel_cmd(source_dir, arch, &["defconfig"]).await?;
+    }
+
+    // Determine number of parallel jobs
+    let nproc_output = std::process::Command::new("nproc").output()?;
+    let nproc = String::from_utf8_lossy(&nproc_output.stdout)
+        .trim()
+        .to_string();
+
+    // Build kernel image and modules
+    let mut build_args: Vec<String> = Vec::new();
+    build_args.push("-j".to_string());
+    build_args.push(nproc.clone());
+    build_args.push("bzImage".to_string());
+    build_args.push("modules".to_string());
+    let build_args_refs: Vec<&str> = build_args.iter().map(|s| s.as_str()).collect();
+
+    kernel_cmd(source_dir, arch, &build_args_refs).await?;
+
     Ok(())
 }
 
@@ -601,8 +657,82 @@ async fn install_kernel_manual(
     arch: Option<&str>,
     deployment_rootfs_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: use the makefile to install the built kernel into the deployment rootfs
+    // Ensure /boot exists in the deployment rootfs
+    let boot_dir = deployment_rootfs_dir.join("boot");
+    std::fs::create_dir_all(&boot_dir)?;
 
+    // Install modules into the target root
+    let install_mod_arg = format!(
+        "INSTALL_MOD_PATH={}/usr",
+        deployment_rootfs_dir.display()
+    );
+    let mut mod_args: Vec<String> = Vec::new();
+    mod_args.push("DEPMOD=/doesnt/exist".to_string());
+    mod_args.push(install_mod_arg);
+    mod_args.push("modules_install".to_string());
+    let mod_args_refs: Vec<&str> = mod_args.iter().map(|s| s.as_str()).collect();
+    kernel_cmd(build_dir, arch, &mod_args_refs).await?;
+
+    // Try to locate the built kernel image
+    let candidates = vec![
+        build_dir
+            .join("arch")
+            .join("x86")
+            .join("boot")
+            .join("bzImage"),
+        build_dir
+            .join("arch")
+            .join("x86")
+            .join("boot")
+            .join("vmlinuz"),
+        build_dir
+            .join("arch")
+            .join("x86")
+            .join("boot")
+            .join("Image"),
+        build_dir
+            .join("arch")
+            .join("arm64")
+            .join("boot")
+            .join("Image"),
+        build_dir.join("vmlinux"),
+    ];
+
+    let image_path = candidates.into_iter().find(|p| p.exists());
+    if let Some(img) = image_path {
+        let dest = boot_dir.join(
+            img.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("vmlinuz")),
+        );
+        std::fs::copy(&img, &dest)?;
+        info!("Installed kernel image to {}", dest.display());
+    } else {
+        warn!("Could not find built kernel image in source tree; skipping kernel image copy");
+    }
+
+    // Copy System.map if present
+    let system_map = build_dir.join("System.map");
+    if system_map.exists() {
+        let dest = boot_dir.join("System.map");
+        std::fs::copy(&system_map, &dest)?;
+    }
+
+    // Copy .config if present
+    let config = build_dir.join(".config");
+    if config.exists() {
+        let dest = boot_dir.join("config");
+        std::fs::copy(&config, &dest)?;
+    }
+
+    /*
+    // Try running depmod to update module dependencies for the new root
+    let _ = Command::new("depmod")
+        .arg("-a")
+        .arg("-b")
+        .arg(deployment_rootfs_dir)
+        .status()
+        .await;
+    */
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-./target/debug/embuer-installer -i test.img --bootloader "refind_amd64" --deployment-name "archlinux" --deployment-source "manual"
+./target/debug/embuer-installer -i test.img --bootloader "refind_amd64" --deployment-name "archlinux" --deployment-source "manual" --manual-kernel "../platform-drivers-x86/"
 
 # You can create a deployment file via:
 # pacstrap -K /tmp/embuer_mnt/rootfs/deployments/archlinux base
