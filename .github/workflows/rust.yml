@@ -19,6 +19,8 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain nightly -y
         source $HOME/.cargo/env
     - name: Install clang-sys Dependencies
-      run: sudo apt-get install -y clang llvm lld libclang-dev
+      run: sudo apt-get install -y clang llvm lld libclang-dev libssl-dev pkg-config
     - name: Build
       run: cargo build --all-features --verbose
+    - name: Run Tests
+      run: cargo test --all-features --verbose

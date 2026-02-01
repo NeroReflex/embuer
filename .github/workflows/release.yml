@@ -52,7 +52,7 @@ jobs:
     - name: Install Build Dependencies
       run: apt-get install -y build-essential devscripts debhelper
     - name: Install clang-sys Dependencies
-      run: apt-get install -y clang llvm lld libclang-dev
+      run: apt-get install -y clang llvm lld libclang-dev libssl-dev pkg-config
     - name: Install Rust toolchain
       run: |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y
