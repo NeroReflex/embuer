@@ -58,6 +58,12 @@ struct EmbuerInstallCli {
 
     #[argh(
         option,
+        description = "script to be used for manual installations, full manual mode when unspecified"
+    )]
+    pub manual_script: Option<String>,
+
+    #[argh(
+        option,
         description = "bootloader to install (refind_amd64, refind_aarch64)",
         short = 'b'
     )]
@@ -369,23 +375,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
 
-            debug!(
-                "Manual deployment source specified: you can install archlinux via: pacstrap -K {} base\n",
-                deployment_rootfs_dir.display(),
-            );
+            match &cli.manual_script {
+                Some(script_path) => {
+                    info!("Executing manual installation script: {}", script_path);
+                    let status = Command::new(script_path)
+                        .arg(&deployment_rootfs_dir)
+                        .arg(&deployment_rootfs_data_dir)
+                        .status()
+                        .await?;
 
-            debug!(
-                "ps aux | grep {} then kill -9 <PID> when done",
-                deployment_rootfs_dir.display(),
-            );
+                    if !status.success() {
+                        error!(
+                            "Manual installation script failed with exit code: {}",
+                            status.code().unwrap_or(-1)
+                        );
+                        return Err(Box::new(std::io::Error::other(
+                            "Manual installation script failed",
+                        )) as Box<dyn std::error::Error>);
+                    }
+                }
+                None => {
+                    info!("No manual installation script specified: entering full manual mode.");
 
-            info!(
-                "Prepare {} and {} then press enter to complete the installation...",
-                deployment_rootfs_dir.display(),
-                deployment_rootfs_data_dir.display()
-            );
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
+                    info!(
+                        "Prepare {} and {} then press enter to complete the installation...",
+                        deployment_rootfs_dir.display(),
+                        deployment_rootfs_data_dir.display()
+                    );
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                }
+            }
 
             let manifet_installed = deployment_rootfs_dir
                 .clone()
