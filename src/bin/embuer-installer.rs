@@ -50,7 +50,7 @@ struct EmbuerInstallCli {
     #[argh(option, description = "image file size if creating a new one (in GiB)")]
     pub image_size: Option<usize>,
 
-    #[argh(option, description = "source of the deployment", short = 's')]
+    #[argh(option, description = "source of the deployment: either URL, file or manual for a manual (or scripted) installation", short = 's')]
     pub deployment_source: String,
 
     #[argh(option, description = "name of the deployment", short = 'k')]
@@ -61,6 +61,27 @@ struct EmbuerInstallCli {
         description = "script to be used for manual installations, full manual mode when unspecified"
     )]
     pub manual_script: Option<String>,
+
+    #[argh(
+        option,
+        description = "path of the kernel to compile and install (path to sources)",
+        short = 'm'
+    )]
+    pub manual_kernel: Option<String>,
+
+    #[argh(
+        option,
+        description = "kernel defconfig to use for manual kernel compilation (use when --manual-kernel is specified, uses .config if not specified)",
+        short = 'f'
+    )]
+    pub manual_kernel_defconfig: Option<String>,
+
+    #[argh(
+        option,
+        description = "architecture of the kernel to compile and install (e.g., x86_64, arm64) defaults to the current architecture",
+        short = 'a'
+    )]
+    pub manual_kernel_arch: Option<String>,
 
     #[argh(
         option,
@@ -543,6 +564,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Installed deployment: {}", installed_deployment_name);
         }
     };
+
+    Ok(())
+}
+
+async fn kernel_cmd(
+    source_dir: &std::path::Path,
+    arch: Option<&str>,
+    args: &[&str]
+) -> Result<(), Box<dyn std::error::Error>> {
+    Command::new("make")
+        .current_dir(source_dir)
+        .arg("LLVM=1")
+        .arg("LLVM_IAS=1")
+        .arg(arch.map_or(String::new(), |a| format!("ARCH={}", a)))
+        .args(args)
+        .status()
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    
+    Ok(())
+}
+
+async fn build_kernel_manual(
+    source_dir: &std::path::Path,
+    arch: Option<&str>,
+    defconfig: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: implement kernel building and issue make all and make bzImage commands
+    
+    Ok(())
+}
+
+async fn install_kernel_manual(
+    build_dir: &std::path::Path,
+    arch: Option<&str>,
+    deployment_rootfs_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: use the makefile to install the built kernel into the deployment rootfs
+
 
     Ok(())
 }
