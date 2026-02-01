@@ -385,13 +385,12 @@ where
 
 /// Common method to install an update from a reader
 pub async fn install_update<R>(
-    pubkey: &RsaPublicKey,
+    signature_verify_data: Option<(&RsaPublicKey, &Vec<u8>)>,
     rootfs_dir: std::path::PathBuf,
     deployments_dir: std::path::PathBuf,
     boot_name: String,
     btrfs: &Arc<Btrfs>,
     reader: R,
-    signature: Vec<u8>,
 ) -> Result<Option<String>, ServiceError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -488,7 +487,10 @@ where
     info!("update.btrfs.xz SHA512: {hash_hex}");
 
     // Verify signature before proceeding with installation
-    verify_signature(pubkey, &signature, hash_hex)?;
+    if let Some((pubkey, signature)) = signature_verify_data {
+        debug!("Verifying signature of the update stream hash");
+        verify_signature(pubkey, signature, hash_hex)?;
+    };
 
     // If an install script is specified in the manifest run it now
     if let Some(install_script) = manifest.install_script() {

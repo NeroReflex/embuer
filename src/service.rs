@@ -510,13 +510,12 @@ impl Service {
         };
 
         install_update(
-            &pubkey,
+            Some((&pubkey, &signature)),
             rootfs_dir.clone(),
             deployments_dir.clone(),
             boot_name.clone(),
             btrfs,
             reader,
-            signature,
         )
         .await
     }

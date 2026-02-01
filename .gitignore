@@ -1,6 +1,8 @@
 /target
 **/embuer.h
 *.img
+*.btrfs
+*.btrfs.xz
 
 /docker-build-out
 

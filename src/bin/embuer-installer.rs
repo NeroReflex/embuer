@@ -19,11 +19,15 @@
 
 extern crate sys_mount;
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use argh::FromArgs;
+use futures::TryStreamExt;
 use log::{debug, error, info, warn};
+use reqwest::Client;
+use std::pin::Pin;
 use tokio::process::Command;
+use tokio_util::io::StreamReader;
 
 /// Embuer Client - Control and monitor the Embuer update service
 #[derive(FromArgs)]
@@ -63,6 +67,9 @@ struct EmbuerInstallCli {
 
     #[argh(option, description = "name of the installation", short = 'n')]
     pub name: Option<String>,
+
+    #[argh(option, description = "wait for input before exiting", short = 'w')]
+    pub wait: Option<bool>,
 }
 
 enum MountType {
@@ -342,39 +349,150 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Prepare the rootfs structure
-    let btrfs = embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e))?;
+    let btrfs = Arc::new(embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e))?);
     info!(
         "Prepare the rootfs from source image {}...",
         cli.deployment_source
     );
-    let rootfs_dir =
-        prepare_rootfs_partition(&btrfs, &rootfs_mount_dir, &cli.deployment_name).await?;
+    let (deployments_dir, deployments_data_dir) =
+        prepare_rootfs_partition(btrfs.clone(), &rootfs_mount_dir).await?;
 
-    // Copy over the deployment rootfs contents
-    info!("Populating the rootfs: {}", rootfs_dir.display());
+    // From here on let the core component take over
+    let deployment_name = cli.deployment_name.clone();
+    match cli.deployment_source.as_str() {
+        "manual" => {
+            let (deployment_rootfs_dir, deployment_rootfs_data_dir) =
+                prepare_deployment_directories(
+                    btrfs.clone(),
+                    &deployments_dir,
+                    &deployments_data_dir,
+                    &deployment_name,
+                )
+                .await?;
+
+            debug!(
+                "Manual deployment source specified: you can install archlinux via: pacstrap -K {} base\n",
+                deployment_rootfs_dir.display(),
+            );
+
+            debug!(
+                "ps aux | grep {} then kill -9 <PID> when done",
+                deployment_rootfs_dir.display(),
+            );
+
+            info!(
+                "Prepare {} and {} then press enter to complete the installation...",
+                deployment_rootfs_dir.display(),
+                deployment_rootfs_data_dir.display()
+            );
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+
+            let subvol_id = btrfs
+                .btrfs_subvol_get_id(&deployment_rootfs_dir)
+                .map_err(|e| Box::new(e))?;
+
+            info!("Setting deployment {deployment_name} subvolume ID {subvol_id} to read-only...");
+            btrfs.subvolume_set_ro(&deployment_rootfs_dir)?;
+
+            let display_root_disk = rootfs_mount_dir.display();
+            info!("Setting the default subvolume of {display_root_disk} to {deployment_name} ({subvol_id})...");
+            btrfs
+                .subvolume_set_default(subvol_id, &rootfs_mount_dir)
+                .map_err(|e| Box::new(e))?;
+        }
+        src => {
+            // Determine source stream: prefer local file if it exists, otherwise try HTTP(S).
+            let local_path = std::path::PathBuf::from(&src);
+            let wrapped_reader: Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>> =
+                if local_path.exists() {
+                    info!(
+                        "Using local file as deployment source: {}",
+                        local_path.display()
+                    );
+                    let file = tokio::fs::File::open(&local_path).await?;
+                    Box::pin(file)
+                } else if cli.deployment_source.as_str().starts_with("https://")
+                    || cli.deployment_source.as_str().starts_with("http://")
+                {
+                    let url = cli.deployment_source.clone();
+                    info!("Downloading deployment from URL: {}", url);
+
+                    let client = Client::new();
+                    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+
+                    if !resp.status().is_success() {
+                        error!("Failed to download {}: HTTP {}", url, resp.status());
+                        return Err("Failed to download update".into());
+                    }
+
+                    let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
+                    let stream_reader = StreamReader::new(byte_stream);
+
+                    // The core.install_update path handles xz decompression internally.
+                    // Just pass the raw HTTP stream reader through.
+                    Box::pin(stream_reader)
+                } else {
+                    error!(
+                        "Deployment source not found or unsupported: {}",
+                        cli.deployment_source
+                    );
+                    return Err("Deployment source not found or unsupported".into());
+                };
+
+            // Single unified install call
+            let installed_deployment_name = match embuer::core::install_update(
+                None,
+                rootfs_mount_dir.clone(),
+                deployments_dir.clone(),
+                deployment_name.clone(),
+                &btrfs,
+                wrapped_reader,
+            )
+            .await
+            {
+                Ok(name) => match name {
+                    Some(name) => {
+                        info!("Successfully installed deployment: {name}");
+
+                        if cli.wait.unwrap_or(false) {
+                            info!("Press enter to continue...");
+                            let mut input = String::new();
+                            std::io::stdin().read_line(&mut input)?;
+                        }
+
+                        name
+                    }
+                    None => {
+                        error!("Failed to install deployment: no deployment name returned");
+                        return Err("No deployment name returned".into());
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to install deployment: {}", e);
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+
+            info!("Installed deployment: {}", installed_deployment_name);
+        }
+    };
 
     Ok(())
 }
 
-async fn prepare_rootfs_partition(
-    btrfs: &embuer::btrfs::Btrfs,
-    rootfs_mount_dir: &std::path::Path,
+async fn prepare_deployment_directories(
+    btrfs: Arc<embuer::btrfs::Btrfs>,
+    deployments_dir: &std::path::Path,
+    deployments_data_dir: &std::path::Path,
     deployment_name: &str,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let deployments_dir = rootfs_mount_dir.join("deployments");
-    let result = btrfs.subvolume_create(&deployments_dir)?;
-    debug!("{}", result.trim());
-
-    let deployments_data_dir = rootfs_mount_dir.join("deployments_data");
-    let result = btrfs.subvolume_create(&deployments_data_dir)?;
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let deployment_rootfs_dir = deployments_dir.join(&deployment_name);
+    let result = btrfs.subvolume_create(&deployment_rootfs_dir)?;
     debug!("{}", result.trim());
 
     let deployments_data_rootfs_dir = deployments_data_dir.join(&deployment_name);
     let result = btrfs.subvolume_create(&deployments_data_rootfs_dir)?;
-    debug!("{}", result.trim());
-
-    let deployment_rootfs_dir = deployments_dir.join(&deployment_name);
-    let result = btrfs.subvolume_create(&deployment_rootfs_dir)?;
     debug!("{}", result.trim());
 
     std::fs::create_dir_all(deployments_data_rootfs_dir.join("etc_overlay/upperdir"))?;
@@ -399,7 +517,22 @@ async fn prepare_rootfs_partition(
     btrfs.subvolume_set_ro(&usr_overlay_dir)?;
     btrfs.subvolume_set_ro(&opt_overlay_dir)?;
 
-    Ok(deployment_rootfs_dir)
+    Ok((deployment_rootfs_dir, deployments_data_rootfs_dir))
+}
+
+async fn prepare_rootfs_partition(
+    btrfs: Arc<embuer::btrfs::Btrfs>,
+    rootfs_mount_dir: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let deployments_dir = rootfs_mount_dir.join("deployments");
+    let result = btrfs.subvolume_create(&deployments_dir)?;
+    debug!("{}", result.trim());
+
+    let deployments_data_dir = rootfs_mount_dir.join("deployments_data");
+    let result = btrfs.subvolume_create(&deployments_data_dir)?;
+    debug!("{}", result.trim());
+
+    Ok((deployments_dir, deployments_data_dir))
 }
 
 const ZIP_DATA: &[u8] = include_bytes!("../../refind-bin-0.14.2.zip");
