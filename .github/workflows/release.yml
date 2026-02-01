@@ -18,7 +18,7 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain nightly -y
         source $HOME/.cargo/env
     - name: Install clang-sys Dependencies
-      run: sudo apt-get install -y clang llvm lld libclang-dev
+      run: sudo apt-get install -y clang llvm lld libclang-dev libssl-dev pkg-config
     - name: Build
       run: cargo build --verbose
 
@@ -74,15 +74,72 @@ jobs:
           *.deb
         if-no-files-found: error
 
+  trixie_build:
+    runs-on: ubuntu-latest
+    container: 
+      image: debian:trixie
+      volumes:
+        - /usr:/usr-host
+        - /opt:/opt-host
+      options: --privileged
+    steps:
+    - name: Maximize build space
+      run: |
+        df -h
+        rm -rf /usr-host/share/dotnet
+        rm -rf /usr-host/share/swift
+        rm -rf /usr-host/share/java
+        rm -rf /usr-host/local/lib/android
+        rm -rf /opt-host/ghc
+        rm -rf /opt-host/hostedtoolcache
+        rm -rf /opt-host/az
+        df -h
+    - uses: actions/checkout@v4
+    - name: Update system
+      run: |
+        apt-get update -y
+        apt-get upgrade -y
+    - name: Install Basic Software
+      run: apt-get install -y sudo curl
+    - name: Install Build Dependencies
+      run: apt-get install -y build-essential devscripts debhelper
+    - name: Install clang-sys Dependencies
+      run: apt-get install -y clang llvm lld libclang-dev libssl-dev pkg-config
+    - name: Install Rust toolchain
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y
+    - name: Build deb
+      run: |
+        . $HOME/.cargo/env
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cargo install cargo-deb
+        cargo deb
+    - name: Move debs
+      run: |
+        mv target/debian/*.deb .
+        for file in *.deb; do mv "$file" "${file%.deb}.trixie.deb"; done
+    - name: Upload package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: trixie-package
+        path: |
+          *.deb
+        if-no-files-found: error
+
   make-release:
     runs-on: ubuntu-latest
 
-    needs: [prepare, bookworm_build]
+    needs: [prepare, bookworm_build, trixie_build]
     steps:
       - name: Download debian bookworm artifacts
         uses: actions/download-artifact@v4
         with:
           name: bookworm-package
+          path: ${{ env.PKGDEST }}
+      - name: Download debian trixie artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trixie-package
           path: ${{ env.PKGDEST }}
       - name: Set env
         run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
