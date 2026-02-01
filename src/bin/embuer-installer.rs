@@ -22,10 +22,10 @@ extern crate sys_mount;
 use std::{collections::VecDeque, sync::Arc};
 
 use argh::FromArgs;
+use embuer::manifest::Manifest;
 use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
-use embuer::{config::Config, manifest::Manifest};
 use std::pin::Pin;
 use tokio::process::Command;
 use tokio_util::io::StreamReader;
@@ -126,7 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let size = cli.image_size.unwrap_or(2);
                 if size == 0 {
                     error!("Error: image size must be greater than 0");
-                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Image size must be greater than 0")) as Box<dyn std::error::Error>);
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Image size must be greater than 0",
+                    )) as Box<dyn std::error::Error>);
                 }
                 Command::new("fallocate")
                     .arg("-l")
@@ -343,7 +346,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Prepare the rootfs structure
-    let btrfs = Arc::new(embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?);
+    let btrfs = Arc::new(
+        embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+    );
     info!(
         "Prepare the rootfs from source image {}...",
         cli.deployment_source
@@ -394,7 +399,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Manifest file not found in the deployment: {}",
                     manifet_installed.display()
                 );
-                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Manifest file not found in the deployment")) as Box<dyn std::error::Error>);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Manifest file not found in the deployment",
+                )) as Box<dyn std::error::Error>);
             }
 
             // Parse the manifest and decide whether the installed deployment should be read-only
@@ -412,10 +420,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if manifest.is_readonly() {
                 info!("Manifest requests read-only deployment; setting subvolume ID {subvol_id} to read-only...");
-                btrfs.subvolume_set_ro(&deployment_rootfs_dir).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                btrfs
+                    .subvolume_set_ro(&deployment_rootfs_dir)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             } else {
                 info!("Manifest requests read-write deployment; ensuring subvolume ID {subvol_id} is read-write...");
-                btrfs.subvolume_set_rw(&deployment_rootfs_dir).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                btrfs
+                    .subvolume_set_rw(&deployment_rootfs_dir)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             }
 
             let display_root_disk = rootfs_mount_dir.display();
@@ -442,11 +454,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Downloading deployment from URL: {}", url);
 
                     let client = Client::new();
-                    let resp = client.get(&url).send().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    let resp = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
                     if !resp.status().is_success() {
                         error!("Failed to download {}: HTTP {}", url, resp.status());
-                        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to download update")) as Box<dyn std::error::Error>);
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Failed to download update",
+                        )) as Box<dyn std::error::Error>);
                     }
 
                     let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
@@ -460,7 +479,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Deployment source not found or unsupported: {}",
                         cli.deployment_source
                     );
-                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Deployment source not found or unsupported")) as Box<dyn std::error::Error>);
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Deployment source not found or unsupported",
+                    )) as Box<dyn std::error::Error>);
                 };
 
             // Single unified install call
@@ -488,7 +510,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => {
                         error!("Failed to install deployment: no deployment name returned");
-                        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "No deployment name returned")) as Box<dyn std::error::Error>);
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "No deployment name returned",
+                        )) as Box<dyn std::error::Error>);
                     }
                 },
                 Err(e) => {
