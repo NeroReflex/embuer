@@ -2,7 +2,7 @@
 name = "embuer"
 license = "GPL-2.0-or-later"
 authors = ["Denis Benato <benato.denis96@gmail.com>"]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 [lib]
@@ -56,3 +56,23 @@ flate2 = "1.1.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+strip = "debuginfo"
+lto = "thin"
+
+[package.metadata.deb]
+license-file = ["LICENSE.md", "4"]
+extended-description = """\
+An suite of software to create and deploy system images
+without using A/B partitioning."""
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/embuer-client", "usr/bin/", "755"],
+    ["target/release/embuer-installer", "usr/bin/", "755"],
+    ["target/release/embuer-service", "usr/bin/", "755"],
+    ["target/release/libembuer.so", "usr/lib/", "755"],
+    ["target/release/test-signature", "usr/bin/", "755"],
+]
