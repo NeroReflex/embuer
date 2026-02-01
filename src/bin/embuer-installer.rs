@@ -25,6 +25,7 @@ use argh::FromArgs;
 use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
+use embuer::{config::Config, manifest::Manifest};
 use std::pin::Pin;
 use tokio::process::Command;
 use tokio_util::io::StreamReader;
@@ -125,15 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let size = cli.image_size.unwrap_or(2);
                 if size == 0 {
                     error!("Error: image size must be greater than 0");
-                    return Err("Image size must be greater than 0".into());
+                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Image size must be greater than 0")) as Box<dyn std::error::Error>);
                 }
                 Command::new("fallocate")
                     .arg("-l")
                     .arg(format!("{size}G"))
                     .arg(img)
                     .output()
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await?;
             }
 
             // Setup loop device, example command:
@@ -144,8 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .arg("--show")
                 .arg(img)
                 .output()
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
 
             let loopdev = String::from_utf8_lossy(&output.stdout).trim().to_string();
             info!("Setup loop device: {loopdev}");
@@ -175,8 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("mklabel")
         .arg("gpt")
         .status()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     let esp_part_size = "64MiB";
 
@@ -201,8 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("esp")
         .arg("on")
         .status()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     let partition1 = {
         let mut result = format!("{}", device_partition.display());
         if result.ends_with(char::is_numeric) {
@@ -248,8 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-F32")
         .arg(&partition1)
         .status()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     info!("Formatting rootfs partition {} with btrfs...", partition2);
     Command::new("mkfs.btrfs")
@@ -258,8 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-L")
         .arg("rootfs")
         .status()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     let base_mount_path = std::env::temp_dir().join("embuer_mnt");
     std::fs::create_dir_all(&base_mount_path)?;
@@ -324,8 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("value")
         .arg(&partition2)
         .output()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     let rootfs_partuuid = String::from_utf8_lossy(&partuuid_find.stdout)
         .trim()
@@ -349,7 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Prepare the rootfs structure
-    let btrfs = Arc::new(embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e))?);
+    let btrfs = Arc::new(embuer::btrfs::Btrfs::new().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?);
     info!(
         "Prepare the rootfs from source image {}...",
         cli.deployment_source
@@ -388,18 +382,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
 
+            let manifet_installed = deployment_rootfs_dir
+                .clone()
+                .join("usr")
+                .join("share")
+                .join("embuer")
+                .join("manifest.json");
+
+            if !manifet_installed.exists() {
+                error!(
+                    "Manifest file not found in the deployment: {}",
+                    manifet_installed.display()
+                );
+                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Manifest file not found in the deployment")) as Box<dyn std::error::Error>);
+            }
+
+            // Parse the manifest and decide whether the installed deployment should be read-only
+            let manifest = match Manifest::from_file(&manifet_installed) {
+                Ok(m) => m,
+                Err(err) => {
+                    error!("Failed to read manifest: {}", err);
+                    return Err(Box::new(err) as Box<dyn std::error::Error>);
+                }
+            };
+
             let subvol_id = btrfs
                 .btrfs_subvol_get_id(&deployment_rootfs_dir)
-                .map_err(|e| Box::new(e))?;
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-            info!("Setting deployment {deployment_name} subvolume ID {subvol_id} to read-only...");
-            btrfs.subvolume_set_ro(&deployment_rootfs_dir)?;
+            if manifest.is_readonly() {
+                info!("Manifest requests read-only deployment; setting subvolume ID {subvol_id} to read-only...");
+                btrfs.subvolume_set_ro(&deployment_rootfs_dir).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            } else {
+                info!("Manifest requests read-write deployment; ensuring subvolume ID {subvol_id} is read-write...");
+                btrfs.subvolume_set_rw(&deployment_rootfs_dir).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            }
 
             let display_root_disk = rootfs_mount_dir.display();
             info!("Setting the default subvolume of {display_root_disk} to {deployment_name} ({subvol_id})...");
             btrfs
                 .subvolume_set_default(subvol_id, &rootfs_mount_dir)
-                .map_err(|e| Box::new(e))?;
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         }
         src => {
             // Determine source stream: prefer local file if it exists, otherwise try HTTP(S).
@@ -419,11 +442,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Downloading deployment from URL: {}", url);
 
                     let client = Client::new();
-                    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+                    let resp = client.get(&url).send().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
                     if !resp.status().is_success() {
                         error!("Failed to download {}: HTTP {}", url, resp.status());
-                        return Err("Failed to download update".into());
+                        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to download update")) as Box<dyn std::error::Error>);
                     }
 
                     let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
@@ -437,7 +460,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Deployment source not found or unsupported: {}",
                         cli.deployment_source
                     );
-                    return Err("Deployment source not found or unsupported".into());
+                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Deployment source not found or unsupported")) as Box<dyn std::error::Error>);
                 };
 
             // Single unified install call
@@ -465,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => {
                         error!("Failed to install deployment: no deployment name returned");
-                        return Err("No deployment name returned".into());
+                        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "No deployment name returned")) as Box<dyn std::error::Error>);
                     }
                 },
                 Err(e) => {
