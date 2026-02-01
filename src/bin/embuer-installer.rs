@@ -462,10 +462,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if !resp.status().is_success() {
                         error!("Failed to download {}: HTTP {}", url, resp.status());
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Failed to download update",
-                        )) as Box<dyn std::error::Error>);
+                        return Err(Box::new(std::io::Error::other("Failed to download update"))
+                            as Box<dyn std::error::Error>);
                     }
 
                     let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
@@ -510,10 +508,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => {
                         error!("Failed to install deployment: no deployment name returned");
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "No deployment name returned",
-                        )) as Box<dyn std::error::Error>);
+                        return Err(
+                            Box::new(std::io::Error::other("No deployment name returned"))
+                                as Box<dyn std::error::Error>,
+                        );
                     }
                 },
                 Err(e) => {
@@ -535,11 +533,11 @@ async fn prepare_deployment_directories(
     deployments_data_dir: &std::path::Path,
     deployment_name: &str,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
-    let deployment_rootfs_dir = deployments_dir.join(&deployment_name);
+    let deployment_rootfs_dir = deployments_dir.join(deployment_name);
     let result = btrfs.subvolume_create(&deployment_rootfs_dir)?;
     debug!("{}", result.trim());
 
-    let deployments_data_rootfs_dir = deployments_data_dir.join(&deployment_name);
+    let deployments_data_rootfs_dir = deployments_data_dir.join(deployment_name);
     let result = btrfs.subvolume_create(&deployments_data_rootfs_dir)?;
     debug!("{}", result.trim());
 
@@ -614,7 +612,7 @@ async fn decompress_refind(
         if file.is_dir() {
             std::fs::create_dir_all(&output_path)?;
         } else {
-            let mut output_file = std::fs::File::create(output_path).map_err(|e| Box::new(e))?;
+            let mut output_file = std::fs::File::create(output_path).map_err(Box::new)?;
             std::io::copy(&mut file, &mut output_file)?;
         }
     }

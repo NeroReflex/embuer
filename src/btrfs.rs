@@ -172,18 +172,18 @@ impl Btrfs {
             .as_ref()
             .inspect_err(|e| error!("btrfs copy stream join error: {e}"))
         else {
-            return Err(ServiceError::IOError(std::io::Error::other(format!(
-                "joining to stream to btrfs receive failed",
-            ))));
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "joining to stream to btrfs receive failed".to_string(),
+            )));
         };
 
         let Ok(btrfs_status) = btrfs_task_res
             .as_ref()
             .inspect_err(|e| error!("btrfs receive join error: {e}"))
         else {
-            return Err(ServiceError::IOError(std::io::Error::other(format!(
-                "joining of btrfs receive failed",
-            ))));
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "joining of btrfs receive failed".to_string(),
+            )));
         };
 
         // Get the subvolume name from stderr (may be None if not found)
@@ -191,9 +191,9 @@ impl Btrfs {
             Ok(name) => name,
             Err(e) => {
                 error!("stderr read task join error: {e}");
-                return Err(ServiceError::IOError(std::io::Error::other(format!(
-                    "reading stderr from btrfs receive failed",
-                ))));
+                return Err(ServiceError::IOError(std::io::Error::other(
+                    "reading stderr from btrfs receive failed".to_string(),
+                )));
             }
         };
 
@@ -476,7 +476,7 @@ impl Btrfs {
     ) -> Result<String, ServiceError> {
         let path_ref = path.as_ref();
 
-        Ok(self.run_and_get_stdout(["subvolume", "create", &path_ref.to_string_lossy()])?)
+        self.run_and_get_stdout(["subvolume", "create", &path_ref.to_string_lossy()])
     }
 
     /// Delete a btrfs subvolume.
@@ -495,7 +495,7 @@ impl Btrfs {
         path: P,
     ) -> Result<String, ServiceError> {
         let path_ref = path.as_ref();
-        Ok(self.run_and_get_stdout(["subvolume", "delete", &path_ref.to_string_lossy()])?)
+        self.run_and_get_stdout(["subvolume", "delete", &path_ref.to_string_lossy()])
     }
 
     /// List all deployment subvolumes in the deployments directory.

@@ -338,27 +338,27 @@ where
         .as_ref()
         .inspect_err(|e| error!("xz input stream join error: {e}"))
     else {
-        return Err(ServiceError::IOError(std::io::Error::other(format!(
-            "joining stream to xz failed",
-        ))));
+        return Err(ServiceError::IOError(std::io::Error::other(
+            "joining stream to xz failed".to_string(),
+        )));
     };
 
     let Ok(xz_status) = xz_task_res
         .as_ref()
         .inspect_err(|e| error!("xz process join error: {e}"))
     else {
-        return Err(ServiceError::IOError(std::io::Error::other(format!(
-            "joining stream to xz failed",
-        ))));
+        return Err(ServiceError::IOError(std::io::Error::other(
+            "joining stream to xz failed".to_string(),
+        )));
     };
 
     let subvolume_result = match btrfs_task_res {
         Ok(result) => result,
         Err(e) => {
             error!("btrfs receive join error: {e}");
-            return Err(ServiceError::IOError(std::io::Error::other(format!(
-                "joining of btrfs receive failed",
-            ))));
+            return Err(ServiceError::IOError(std::io::Error::other(
+                "joining of btrfs receive failed".to_string(),
+            )));
         }
     };
 
