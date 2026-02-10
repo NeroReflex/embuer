@@ -891,6 +891,9 @@ async fn prepare_rootfs_partition(
     let result = btrfs.subvolume_create(&deployments_data_dir)?;
     debug!("{}", result.trim());
 
+    info!("Sealing the main subvolume");
+    btrfs.subvolume_set_ro(rootfs_mount_dir)?;
+
     Ok((deployments_dir, deployments_data_dir))
 }
 
