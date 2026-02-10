@@ -82,14 +82,14 @@ struct EmbuerInstallCli {
 
     #[argh(
         option,
-        description = "architecture of the kernel to compile and install (e.g., x86_64, arm64) defaults to the current architecture",
+        description = "architecture of the machine (e.g., x86_64, arm64) in addition to kernel names the following are available: imx8",
         short = 'a'
     )]
-    pub manual_kernel_arch: Option<String>,
+    pub arch: Option<String>,
 
     #[argh(
         option,
-        description = "bootloader to install (refind_amd64, refind_aarch64)",
+        description = "bootloader to install (refind, imx8://<file>)",
         short = 'b'
     )]
     pub bootloader: Option<String>,
@@ -102,6 +102,17 @@ struct EmbuerInstallCli {
 
     #[argh(option, description = "wait for input before exiting", short = 'w')]
     pub wait: Option<bool>,
+}
+
+enum Architecture {
+    GenericAMD64,
+    GenericAarch64,
+    IMX8,
+}
+
+enum Bootloader {
+    Refind,
+    IMX8(std::path::PathBuf)
 }
 
 enum MountType {
@@ -195,6 +206,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Error: either --device or --image must be specified");
             std::process::exit(1)
         }
+    };
+
+    // Parse architecture option into internal enum
+    let architecture = match cli.arch.as_deref() {
+        Some("x86_64") | Some("amd64") => Architecture::GenericAMD64,
+        Some("arm64") | Some("aarch64") => Architecture::GenericAarch64,
+        Some("imx8") => Architecture::IMX8,
+        Some(other) => {
+            warn!("Unknown architecture '{}', defaulting to x86_64", other);
+            Architecture::GenericAMD64
+        }
+        None => {
+            info!("No architecture specified, defaulting to x86_64");
+            Architecture::GenericAMD64
+        }
+    };
+
+    // Parse bootloader option. Supported forms:
+    // - "refind" (will pick the rEFInd variant based on architecture)
+    // - "imx8://<file>" (IMX8 bootloader file)
+    let bootloader: Option<Bootloader> = match cli.bootloader.as_deref() {
+        Some(s) => {
+            if s.starts_with("imx8://") {
+                let path = s.trim_start_matches("imx8://");
+                let path = std::path::PathBuf::from(path);
+
+                if !path.exists() {
+                    error!("Specified IMX8 bootloader file does not exist: {}", path.display());
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "Specified IMX8 bootloader file does not exist",
+                    )) as Box<dyn std::error::Error>);
+                }
+
+                Some(Bootloader::IMX8(path))
+            } else if s == "refind" {
+                Some(Bootloader::Refind)
+            } else {
+                warn!("Unsupported bootloader string provided: {}", s);
+                None
+            }
+        }
+        None => None,
     };
 
     // Create a partition table
@@ -361,19 +415,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Rootfs PARTUUID: {rootfs_partuuid}");
 
-    // Install bootloader if specified
-    if let Some(bootloader) = cli.bootloader.as_ref() {
-        info!("Installing bootloader: {bootloader}...");
-        install_bootloader(
-            &esp_mount_dir,
-            bootloader,
-            rootfs_partuuid.as_str(),
-            cli.cmdline.as_deref().unwrap_or(""),
-            name.as_str(),
-        )
-        .await?;
-    } else {
-        warn!("No bootloader specified: skipping bootloader installation");
+    match bootloader {
+        Some(Bootloader::Refind) => {
+            info!("Installing bootloader: refind...");
+            install_bootloader_refind(
+                &esp_mount_dir,
+                &architecture,
+                rootfs_partuuid.as_str(),
+                cli.cmdline.as_deref().unwrap_or(""),
+                name.as_str(),
+            )
+            .await?;
+        },
+        Some(Bootloader::IMX8(path)) => {
+            info!("Installing bootloader: IMX8 from file {}...", path.display());
+            
+            todo!()
+        }
+        None => warn!("No bootloader specified: skipping bootloader installation"),
     }
 
     // Prepare the rootfs structure
@@ -409,7 +468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let kernel_path = std::path::Path::new(kernel_src);
                 manual_kernel(
                     kernel_path,
-                    cli.manual_kernel_arch.as_deref(),
+                    cli.arch.as_deref(),
                     cli.manual_kernel_defconfig.as_deref(),
                     &deployment_rootfs_dir,
                 )
@@ -833,9 +892,9 @@ async fn decompress_refind(
 const REFIND_CONFIG: &[u8] = include_bytes!("../../refind.conf");
 const SHIM_BOOTX64: &[u8] = include_bytes!("../../BOOTX64.EFI");
 const SHIM_MMX64: &[u8] = include_bytes!("../../mmx64.efi");
-async fn install_bootloader(
+async fn install_bootloader_refind(
     mount_point: &std::path::Path,
-    bootloader: &str,
+    arch: &Architecture,
     rootfs_partuuid: &str,
     cmdline: &str,
     name: &str,
@@ -901,8 +960,8 @@ async fn install_bootloader(
     refind_conf_content = refind_conf_content.replace("{KERNEL_CMDLINE}", cmdline);
     std::fs::write(&refind_conf_path, refind_conf_content)?;
 
-    match bootloader {
-        "refind_amd64" => {
+    match arch {
+        Architecture::GenericAMD64 => {
             info!("Installing rEFInd amd64 bootloader...");
 
             let bootx64_path = efi_dir.join("BOOT").join("BOOTX64.EFI");
@@ -919,14 +978,14 @@ async fn install_bootloader(
             }
             std::fs::write(&mmx64_path, SHIM_MMX64)?;
         }
-        "refind_aarch64" => {
+        Architecture::GenericAarch64 => {
             info!("Installing rEFInd aarch64 bootloader...");
 
             // TODO: do aarch64 installation
             return Err("Not yet implemented".into());
         }
         _ => {
-            error!("Unsupported bootloader: {}", bootloader);
+            error!("Unsupported architecture for the specified bootloader");
             return Err("Unsupported bootloader".into());
         }
     }
