@@ -112,7 +112,7 @@ enum Architecture {
 
 enum Bootloader {
     Refind,
-    IMX8(std::path::PathBuf)
+    IMX8(std::path::PathBuf),
 }
 
 enum MountType {
@@ -229,6 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse bootloader option. Supported forms:
     // - "refind" (will pick the rEFInd variant based on architecture)
     // - "imx8://<file>" (IMX8 bootloader file)
+    let mut rootfs_part_number = 1u32;
     let bootloader: Option<Bootloader> = match cli.bootloader.as_deref() {
         Some(s) => {
             if s.starts_with("imx8://") {
@@ -236,7 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let path = std::path::PathBuf::from(path);
 
                 if !path.exists() {
-                    error!("Specified IMX8 bootloader file does not exist: {}", path.display());
+                    error!(
+                        "Specified IMX8 bootloader file does not exist: {}",
+                        path.display()
+                    );
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         "Specified IMX8 bootloader file does not exist",
@@ -245,6 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 Some(Bootloader::IMX8(path))
             } else if s == "refind" {
+                rootfs_part_number = 2u32;
                 Some(Bootloader::Refind)
             } else {
                 warn!("Unsupported bootloader string provided: {}", s);
@@ -255,6 +260,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create a partition table
+    let label = match bootloader {
+        Some(Bootloader::Refind) => "gpt",
+        Some(Bootloader::IMX8(_)) => "msdos",
+        None => "gpt",
+    };
     info!(
         "Creating partition table on device {}...",
         device_partition.display()
@@ -263,12 +273,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-s")
         .arg(&device_partition)
         .arg("mklabel")
-        .arg("gpt")
+        .arg(label)
         .status()
         .await?;
 
     let rootfs_partition_offset = match bootloader {
-        Some(Bootloader::IMX8(_)) => "16MiB",
+        Some(Bootloader::IMX8(_)) => "8MiB",
         _ => "64MiB",
     };
 
@@ -276,32 +286,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Creating btrfs partition on device {}...",
         device_partition.display()
     );
-    Command::new("parted")
+
+    let mut rootfs_create_cmd = Command::new("parted");
+    rootfs_create_cmd
         .arg("-s")
         .arg(&device_partition)
         .arg("mkpart")
         .arg("primary")
         .arg("btrfs")
         .arg(rootfs_partition_offset)
-        .arg("100%")
-        .arg("type")
-        .arg("2")
-        .arg("4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709")
+        .arg("100%");
+
+    if label == "gpt" {
+        rootfs_create_cmd
+            .arg("type")
+            .arg("2")
+            .arg("4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709");
+    }
+
+    rootfs_create_cmd
         .status()
         .await
         .map_err(|e| e.to_string())?;
     let partition_rootfs = {
         let mut result = format!("{}", device_partition.display());
         if result.ends_with(char::is_numeric) {
-            result = format!("{}p2", result);
+            result = format!("{}p{}", result, rootfs_part_number);
         } else {
-            result = format!("{}2", result);
+            result = format!("{}{}", result, rootfs_part_number);
         }
 
         result
     };
 
-    info!("Formatting rootfs partition {} with btrfs...", partition_rootfs);
+    info!(
+        "Formatting rootfs partition {} with btrfs...",
+        partition_rootfs
+    );
     Command::new("mkfs.btrfs")
         .arg("-f")
         .arg(&partition_rootfs)
@@ -333,7 +354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .map_err(|e| e.to_string())?;
 
-        mounts.push_front(MountType::Device(std::path::PathBuf::from(&partition_rootfs)));
+        mounts.push_front(MountType::Device(std::path::PathBuf::from(
+            &partition_rootfs,
+        )));
 
         rootfs_mount_point
     };
@@ -356,11 +379,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match bootloader {
         Some(Bootloader::Refind) => {
             info!("Installing bootloader: refind...");
-            
-        },
+        }
         Some(Bootloader::IMX8(path)) => {
-            info!("Installing bootloader: IMX8 from file {}...", path.display());
-            
+            info!(
+                "Installing bootloader: IMX8 from file {}...",
+                path.display()
+            );
+
             todo!()
         }
         None => warn!("No bootloader specified: skipping bootloader installation"),
@@ -445,7 +470,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Some(Bootloader::IMX8(path)) => {
-            info!("Installing bootloader: IMX8 from file {}...", path.display());
+            info!(
+                "Installing bootloader: IMX8 from file {}...",
+                path.display()
+            );
 
             todo!()
         }
@@ -740,10 +768,7 @@ async fn install_kernel_manual(
     std::fs::create_dir_all(&boot_dir)?;
 
     // Install modules into the target root
-    let install_mod_arg = format!(
-        "INSTALL_MOD_PATH={}/usr",
-        deployment_rootfs_dir.display()
-    );
+    let install_mod_arg = format!("INSTALL_MOD_PATH={}/usr", deployment_rootfs_dir.display());
     let mut mod_args: Vec<String> = Vec::new();
     mod_args.push("DEPMOD=/doesnt/exist".to_string());
     mod_args.push(install_mod_arg);
