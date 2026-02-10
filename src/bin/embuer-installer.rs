@@ -152,6 +152,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut mounts: VecDeque<MountType> = VecDeque::new();
 
+    let base_mount_path = std::env::temp_dir().join("embuer_mnt");
+    std::fs::create_dir_all(&base_mount_path)?;
+
     let name = match cli.name.as_ref() {
         Some(n) => n.clone(),
         None => "embuer".to_string(),
@@ -264,39 +267,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .status()
         .await?;
 
-    let esp_part_size = "64MiB";
-
-    // Create a fat32 boot partition for EFI of 512MiB
-    info!(
-        "Creating EFI boot partition on device {}...",
-        device_partition.display()
-    );
-    Command::new("parted")
-        .arg("-s")
-        .arg(&device_partition)
-        .arg("mkpart")
-        .arg("primary")
-        .arg("fat32")
-        .arg("1MiB")
-        .arg(esp_part_size)
-        .arg("type")
-        .arg("1")
-        .arg("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
-        .arg("set")
-        .arg("1")
-        .arg("esp")
-        .arg("on")
-        .status()
-        .await?;
-    let partition1 = {
-        let mut result = format!("{}", device_partition.display());
-        if result.ends_with(char::is_numeric) {
-            result = format!("{}p1", result);
-        } else {
-            result = format!("{}1", result);
-        }
-
-        result
+    let rootfs_partition_offset = match bootloader {
+        Some(Bootloader::IMX8(_)) => "16MiB",
+        _ => "64MiB",
     };
 
     info!(
@@ -309,7 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("mkpart")
         .arg("primary")
         .arg("btrfs")
-        .arg(esp_part_size)
+        .arg(rootfs_partition_offset)
         .arg("100%")
         .arg("type")
         .arg("2")
@@ -317,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .status()
         .await
         .map_err(|e| e.to_string())?;
-    let partition2 = {
+    let partition_rootfs = {
         let mut result = format!("{}", device_partition.display());
         if result.ends_with(char::is_numeric) {
             result = format!("{}p2", result);
@@ -328,49 +301,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result
     };
 
-    info!("Formatting EFI partition {} with FAT32...", partition1);
-    Command::new("mkfs.fat")
-        .arg("-F32")
-        .arg(&partition1)
-        .status()
-        .await?;
-
-    info!("Formatting rootfs partition {} with btrfs...", partition2);
+    info!("Formatting rootfs partition {} with btrfs...", partition_rootfs);
     Command::new("mkfs.btrfs")
         .arg("-f")
-        .arg(&partition2)
+        .arg(&partition_rootfs)
         .arg("-L")
         .arg("rootfs")
         .status()
         .await?;
-
-    let base_mount_path = std::env::temp_dir().join("embuer_mnt");
-    std::fs::create_dir_all(&base_mount_path)?;
-
-    // Mount ESP partition
-    let esp_mount_dir = {
-        let esp_mount_point =
-            std::path::PathBuf::from(format!("{}/esp", base_mount_path.display()));
-
-        std::fs::create_dir_all(&esp_mount_point)?;
-
-        info!(
-            "Mounting ESP partition {} to {}...",
-            partition1,
-            esp_mount_point.display()
-        );
-
-        Command::new("mount")
-            .arg(&partition1)
-            .arg(&esp_mount_point)
-            .status()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        mounts.push_front(MountType::Device(std::path::PathBuf::from(&partition1)));
-
-        esp_mount_point
-    };
 
     let rootfs_mount_dir = {
         let rootfs_mount_point =
@@ -380,7 +318,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!(
             "Mounting rootfs partition {} to {}...",
-            partition2,
+            partition_rootfs,
             rootfs_mount_point.display()
         );
 
@@ -389,13 +327,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .arg("btrfs")
             .arg("-o")
             .arg("subvolid=5,compress-force=zstd:15,noatime,rw")
-            .arg(&partition2)
+            .arg(&partition_rootfs)
             .arg(&rootfs_mount_point)
             .status()
             .await
             .map_err(|e| e.to_string())?;
 
-        mounts.push_front(MountType::Device(std::path::PathBuf::from(&partition2)));
+        mounts.push_front(MountType::Device(std::path::PathBuf::from(&partition_rootfs)));
 
         rootfs_mount_point
     };
@@ -405,7 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("PARTUUID")
         .arg("-o")
         .arg("value")
-        .arg(&partition2)
+        .arg(&partition_rootfs)
         .output()
         .await?;
 
@@ -418,6 +356,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match bootloader {
         Some(Bootloader::Refind) => {
             info!("Installing bootloader: refind...");
+            
+        },
+        Some(Bootloader::IMX8(path)) => {
+            info!("Installing bootloader: IMX8 from file {}...", path.display());
+            
+            todo!()
+        }
+        None => warn!("No bootloader specified: skipping bootloader installation"),
+    }
+
+    match bootloader {
+        Some(Bootloader::Refind) => {
+            info!("Selected bootloader rEFInd requires an espo partition");
+
+            // Create a fat32 boot partition for EFI of 512MiB
+            info!(
+                "Creating EFI boot partition on device {}...",
+                device_partition.display()
+            );
+            Command::new("parted")
+                .arg("-s")
+                .arg(&device_partition)
+                .arg("mkpart")
+                .arg("primary")
+                .arg("fat32")
+                .arg("1MiB")
+                .arg(rootfs_partition_offset)
+                .arg("type")
+                .arg("1")
+                .arg("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+                .arg("set")
+                .arg("1")
+                .arg("esp")
+                .arg("on")
+                .status()
+                .await?;
+            let partition_esp = {
+                let mut result = format!("{}", device_partition.display());
+                if result.ends_with(char::is_numeric) {
+                    result = format!("{}p1", result);
+                } else {
+                    result = format!("{}1", result);
+                }
+
+                result
+            };
+
+            info!("Formatting EFI partition {} with FAT32...", partition_esp);
+            Command::new("mkfs.fat")
+                .arg("-F32")
+                .arg(&partition_esp)
+                .status()
+                .await?;
+
+            // Mount ESP partition
+            let esp_mount_dir = {
+                let esp_mount_point =
+                    std::path::PathBuf::from(format!("{}/esp", base_mount_path.display()));
+
+                std::fs::create_dir_all(&esp_mount_point)?;
+
+                info!(
+                    "Mounting ESP partition {} to {}...",
+                    partition_esp,
+                    esp_mount_point.display()
+                );
+
+                Command::new("mount")
+                    .arg(&partition_esp)
+                    .arg(&esp_mount_point)
+                    .status()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                mounts.push_front(MountType::Device(std::path::PathBuf::from(&partition_esp)));
+
+                esp_mount_point
+            };
+
             install_bootloader_refind(
                 &esp_mount_dir,
                 &architecture,
@@ -426,13 +443,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name.as_str(),
             )
             .await?;
-        },
+        }
         Some(Bootloader::IMX8(path)) => {
             info!("Installing bootloader: IMX8 from file {}...", path.display());
-            
+
             todo!()
         }
-        None => warn!("No bootloader specified: skipping bootloader installation"),
+        None => {
+            info!("No bootloader specified: skipping...");
+        }
     }
 
     // Prepare the rootfs structure
