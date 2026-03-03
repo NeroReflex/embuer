@@ -287,6 +287,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_partition.display()
     );
 
+    // If rEFInd is selected we must create the EFI (ESP) partition first
+    if let Some(Bootloader::Refind) = bootloader {
+        info!(
+            "Creating EFI boot partition (partition 1) on device {}...",
+            device_partition.display()
+        );
+
+        // Create partition 1 from 1MiB to rootfs_partition_offset
+        Command::new("parted")
+            .arg("-s")
+            .arg(&device_partition)
+            .arg("mkpart")
+            .arg("primary")
+            .arg("fat32")
+            .arg("1MiB")
+            .arg(rootfs_partition_offset)
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Set type UUID for partition 1 and mark as ESP
+        let type_status = Command::new("parted")
+            .arg("-s")
+            .arg(&device_partition)
+            .arg("type")
+            .arg("1")
+            .arg("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !type_status.success() {
+            let msg = format!(
+                "parted type command failed for {}",
+                device_partition.display()
+            );
+            error!("{}", msg);
+            return Err(
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                    as Box<dyn std::error::Error>,
+            );
+        }
+
+        let set_status = Command::new("parted")
+            .arg("-s")
+            .arg(&device_partition)
+            .arg("set")
+            .arg("1")
+            .arg("esp")
+            .arg("on")
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !set_status.success() {
+            let msg = format!(
+                "parted set command failed for {}",
+                device_partition.display()
+            );
+            error!("{}", msg);
+            return Err(
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                    as Box<dyn std::error::Error>,
+            );
+        }
+    }
+
     let mut rootfs_create_cmd = Command::new("parted");
     rootfs_create_cmd
         .arg("-s")
@@ -297,17 +364,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(rootfs_partition_offset)
         .arg("100%");
 
-    if label == "gpt" {
-        rootfs_create_cmd
-            .arg("type")
-            .arg("2")
-            .arg("4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709");
-    }
-
+    // Run mkpart to create the partition
     rootfs_create_cmd
         .status()
         .await
         .map_err(|e| e.to_string())?;
+
+    // For GPT label, set the partition type GUID using a separate parted invocation
+    if label == "gpt" {
+        info!(
+            "Setting GPT partition type GUID for partition {} on {}...",
+            rootfs_part_number,
+            device_partition.display()
+        );
+
+        let type_status = Command::new("parted")
+            .arg("-s")
+            .arg(&device_partition)
+            .arg("type")
+            .arg(format!("{}", rootfs_part_number))
+            .arg("4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709")
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !type_status.success() {
+            let msg = format!(
+                "parted type command failed for {}",
+                device_partition.display()
+            );
+            error!("{}", msg);
+            return Err(
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                    as Box<dyn std::error::Error>,
+            );
+        }
+    }
     let partition_rootfs = {
         let mut result = format!("{}", device_partition.display());
         if result.ends_with(char::is_numeric) {
@@ -396,27 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Selected bootloader rEFInd requires an espo partition");
 
             // Create a fat32 boot partition for EFI of 512MiB
-            info!(
-                "Creating EFI boot partition on device {}...",
-                device_partition.display()
-            );
-            Command::new("parted")
-                .arg("-s")
-                .arg(&device_partition)
-                .arg("mkpart")
-                .arg("primary")
-                .arg("fat32")
-                .arg("1MiB")
-                .arg(rootfs_partition_offset)
-                .arg("type")
-                .arg("1")
-                .arg("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
-                .arg("set")
-                .arg("1")
-                .arg("esp")
-                .arg("on")
-                .status()
-                .await?;
+            debug!("EFI partition already created earlier; formatting/mounting only...");
             let partition_esp = {
                 let mut result = format!("{}", device_partition.display());
                 if result.ends_with(char::is_numeric) {
