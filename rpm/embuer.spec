@@ -49,3 +49,5 @@ install -m 644 rootfs/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf %{bui
 /usr/share/dbus-1/system.d/org.neroreflex.embuer.conf
 
 %changelog
+* Thu Mar 05 2026 CI Build <ci@example.com> - %{version}-1
+- Automated build: added changelog entry for reproducible build systems

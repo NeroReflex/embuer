@@ -55,7 +55,8 @@ jobs:
       run: apt-get install -y clang llvm lld libclang-dev libssl-dev pkg-config
     - name: Install Rust toolchain
       run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y
+        # Use Fedora-packaged Rust and Cargo so RPM builds use distro toolchain
+        dnf install -y rust cargo
     - name: Build deb
       run: |
         . $HOME/.cargo/env
