@@ -69,7 +69,7 @@ install: build-release install-header
 #	ldconfig
 
 # Install just the header file
-install-header:
+install-header: build-release
 	mkdir -p $(DESTDIR)/usr/include/
 	install -m 644 target/release/embuer.h $(DESTDIR)/usr/include/
 
