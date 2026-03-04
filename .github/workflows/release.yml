@@ -163,7 +163,6 @@ jobs:
         if-no-files-found: error
 
   fedora_build:
-    needs: [arch_build]
     runs-on: ubuntu-latest
     container:
       image: fedora:43
@@ -184,11 +183,6 @@ jobs:
         rm -rf /opt-host/az || true
         df -h
     - uses: actions/checkout@v4
-    - name: Download arch tarball
-      uses: actions/download-artifact@v4
-      with:
-        name: arch-tarball
-        path: .
     - name: Update system
       run: |
         dnf -y update || true
@@ -203,8 +197,7 @@ jobs:
       run: |
         mkdir -p rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
         cp rpm/embuer.spec rpmbuild/SPECS/
-        cp embuer-${GITHUB_REF#refs/*/}.tar.gz rpmbuild/SOURCES/
-        rpmbuild --define "_topdir $PWD/rpmbuild" --define "version ${GITHUB_REF#refs/*/}" -ba rpmbuild/SPECS/embuer.spec
+        rpmbuild --define "_topdir $PWD/rpmbuild" --define "_sourcedir $PWD" --define "version ${GITHUB_REF#refs/*/}" -ba rpmbuild/SPECS/embuer.spec
     - name: Move rpms
       run: |
         mv rpmbuild/RPMS/*/*.rpm . || true
