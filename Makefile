@@ -73,7 +73,13 @@ install: build-release install-header
 # Install just the header file
 install-header: build-release
 	mkdir -p $(DESTDIR)/usr/include/
-	install -m 644 target/release/embuer.h $(DESTDIR)/usr/include/
+	@found=`find target -name embuer.h -print -quit` ; \
+	if [ -n "$$found" ]; then \
+		install -m 644 "$$found" $(DESTDIR)/usr/include/ ; \
+	else \
+		echo "embuer.h not found under target/ (have you run make build-release?)" ; \
+		exit 1 ; \
+	fi
 
 # Run the service (requires root)
 run-service: build-release
