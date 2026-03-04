@@ -71,7 +71,7 @@ install: build-release install-header
 # Install just the header file
 install-header:
 	mkdir -p $(DESTDIR)/usr/include/
-	install -m 644 embuer.h $(DESTDIR)/usr/include/
+	install -m 644 target/release/embuer.h $(DESTDIR)/usr/include/
 
 # Run the service (requires root)
 run-service: build-release
