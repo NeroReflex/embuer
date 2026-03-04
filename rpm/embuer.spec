@@ -6,7 +6,8 @@ Summary:        Embuer - a small service and library for systemd / dbus
 License:        GPLv2
 URL:            https://github.com/neroreflex/embuer
 BuildRequires:  cargo, gcc, clang, openssl-devel, pkgconfig, make
-Requires:       %{?__provides:}
+# Provide explicit runtime Requires to avoid empty macro expansion in some rpmbuild setups
+Requires:       systemd, dbus
 
 %description
 Embuer provides a small service and library for managing systemd/dbus
