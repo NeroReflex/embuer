@@ -22,7 +22,7 @@ export CARGO_HOME="$HOME/.cargo" || true
 export PATH="$HOME/.cargo/bin:$PATH"
 # Build all binaries in release mode and place artifacts under the checked-out
 # repository `target/` directory so `%install` can find `target/release/...`.
-cargo build --release --bins --manifest-path "%{_sourcedir}/Cargo.toml" --target-dir "%{_sourcedir}/target"
+cargo build --release --manifest-path "%{_sourcedir}/Cargo.toml" --target-dir "%{_sourcedir}/target"
 
 %install
 ls -lah .
