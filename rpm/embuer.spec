@@ -16,19 +16,13 @@ integration for embedded workflows.
 %prep
 # No source tarball; build directly from the checked-out tree.
 # rpmbuild will be invoked with `_sourcedir` pointing at the repo.
-# Copy sources into the build directory so `%build` runs in the source tree
-# (rpmbuild doesn't automatically chdir into the repository when _sourcedir
-# is used this way).
-rm -rf *
-cp -a %{_sourcedir}/. .
-# Ensure a clean build environment
-rm -rf .git target || true
 
 %build
 export CARGO_HOME="$HOME/.cargo" || true
 export PATH="$HOME/.cargo/bin:$PATH"
-# Build all binaries in release mode (works with cross-target dirs)
-cargo build --release --bins
+# Build all binaries in release mode and place artifacts under the checked-out
+# repository `target/` directory so `%install` can find `target/release/...`.
+cargo build --release --bins --manifest-path "%{_sourcedir}/Cargo.toml" --target-dir "%{_sourcedir}/target"
 
 %install
 rm -rf %{buildroot}
