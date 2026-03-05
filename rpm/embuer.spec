@@ -25,24 +25,25 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --bins --manifest-path "%{_sourcedir}/Cargo.toml" --target-dir "%{_sourcedir}/target"
 
 %install
+ls -lah .
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/bin
-# Locate built binaries under target/**/release to support target-specific dirs
-srv_bin=$(find target -type f -path "*/release/embuer-service" -print -quit)
-clt_bin=$(find target -type f -path "*/release/embuer-client" -print -quit)
-inst_bin=$(find target -type f -path "*/release/embuer-installer" -print -quit)
-if [ -z "$srv_bin" ] || [ -z "$clt_bin" ] || [ -z "$inst_bin" ]; then
-	echo "One or more built binaries not found under target/**/release" >&2
+# Install directly from the repository target dir where Cargo writes artifacts
+srv_bin="%{_sourcedir}/target/release/embuer-service"
+clt_bin="%{_sourcedir}/target/release/embuer-client"
+inst_bin="%{_sourcedir}/target/release/embuer-installer"
+if [ ! -f "$srv_bin" ] || [ ! -f "$clt_bin" ] || [ ! -f "$inst_bin" ]; then
+	echo "Build artifacts missing in %{_sourcedir}/target/release; ensure cargo built with --target-dir %{_sourcedir}/target" >&2
 	exit 1
 fi
 install -m 755 "$srv_bin" %{buildroot}/usr/bin/embuer-service
 install -m 755 "$clt_bin" %{buildroot}/usr/bin/embuer-client
 install -m 755 "$inst_bin" %{buildroot}/usr/bin/embuer-installer
 mkdir -p %{buildroot}/usr/lib
-libso=$(find target -type f -path "*/release/libembuer.so" -print -quit)
-liba=$(find target -type f -path "*/release/libembuer.a" -print -quit)
-if [ -z "$libso" ] || [ -z "$liba" ]; then
-	echo "Library artifacts not found under target/**/release" >&2
+libso="%{_sourcedir}/target/release/libembuer.so"
+liba="%{_sourcedir}/target/release/libembuer.a"
+if [ ! -f "$libso" ] || [ ! -f "$liba" ]; then
+	echo "Library artifacts missing in %{_sourcedir}/target/release; ensure cargo built with --target-dir %{_sourcedir}/target" >&2
 	exit 1
 fi
 install -m 644 "$libso" %{buildroot}/usr/lib/libembuer.so
