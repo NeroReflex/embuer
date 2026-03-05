@@ -196,6 +196,12 @@ jobs:
       run: |
         mkdir -p rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
         cp rpm/embuer.spec rpmbuild/SPECS/
+        if [ -f "$PWD/Cargo.lock" ]; then
+          echo "Fedora is a whiny baby and refuses to use dependencies that are told to be used."
+          rm -f $PWD/Cargo.lock
+        else
+          echo "Cargo.lock not found, skipping removal"
+        fi
         rpmbuild --define "_topdir $PWD/rpmbuild" --define "_sourcedir $PWD" --define "version ${GITHUB_REF#refs/*/}" -ba rpmbuild/SPECS/embuer.spec
     - name: Move rpms
       run: |

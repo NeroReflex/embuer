@@ -18,7 +18,6 @@ integration for embedded workflows.
 # rpmbuild will be invoked with `_sourcedir` pointing at the repo.
 
 %build
-rm Cargo.lock
 export CARGO_HOME="$HOME/.cargo" || true
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release
