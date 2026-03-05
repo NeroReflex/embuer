@@ -49,9 +49,9 @@ fi
 install -m 644 "$libso" %{buildroot}/usr/lib/libembuer.so
 install -m 644 "$liba" %{buildroot}/usr/lib/libembuer.a
 mkdir -p %{buildroot}/usr/lib/systemd/system
-install -m 644 rootfs/usr/lib/systemd/system/embuer.service %{buildroot}/usr/lib/systemd/system/embuer.service
+install -m 644 %{_sourcedir}/rootfs/usr/lib/systemd/system/embuer.service %{buildroot}/usr/lib/systemd/system/embuer.service
 mkdir -p %{buildroot}/usr/share/dbus-1/system.d
-install -m 644 rootfs/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf %{buildroot}/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf
+install -m 644 %{_sourcedir}/rootfs/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf %{buildroot}/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf
 
 %files
 %license LICENSE.md
