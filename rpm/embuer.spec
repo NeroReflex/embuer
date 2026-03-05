@@ -53,6 +53,23 @@ install -m 644 %{_sourcedir}/rootfs/usr/lib/systemd/system/embuer.service %{buil
 mkdir -p %{buildroot}/usr/share/dbus-1/system.d
 install -m 644 %{_sourcedir}/rootfs/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf %{buildroot}/usr/share/dbus-1/system.d/org.neroreflex.embuer.conf
 
+# Install documentation and license from the repository so %doc/%license work
+mkdir -p %{buildroot}/usr/share/doc/embuer
+if [ -f %{_sourcedir}/README.md ]; then
+	install -m 644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/embuer/README.md
+else
+	echo "README.md missing in %{_sourcedir}; cannot populate %doc" >&2
+	exit 1
+fi
+
+mkdir -p %{buildroot}/usr/share/licenses/embuer
+if [ -f %{_sourcedir}/LICENSE.md ]; then
+	install -m 644 %{_sourcedir}/LICENSE.md %{buildroot}/usr/share/licenses/embuer/LICENSE.md
+else
+	echo "LICENSE.md missing in %{_sourcedir}; cannot populate %license" >&2
+	exit 1
+fi
+
 %files
 %license LICENSE.md
 %doc README.md
