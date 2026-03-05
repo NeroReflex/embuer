@@ -20,17 +20,32 @@ integration for embedded workflows.
 %build
 export CARGO_HOME="$HOME/.cargo" || true
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --release
+# Build all binaries in release mode (works with cross-target dirs)
+cargo build --release --bins
 
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/bin
-install -m 755 target/release/embuer-service %{buildroot}/usr/bin/embuer-service
-install -m 755 target/release/embuer-client %{buildroot}/usr/bin/embuer-client
-install -m 755 target/release/embuer-installer %{buildroot}/usr/bin/embuer-installer
+# Locate built binaries under target/**/release to support target-specific dirs
+srv_bin=$(find target -type f -path "*/release/embuer-service" -print -quit)
+clt_bin=$(find target -type f -path "*/release/embuer-client" -print -quit)
+inst_bin=$(find target -type f -path "*/release/embuer-installer" -print -quit)
+if [ -z "$srv_bin" ] || [ -z "$clt_bin" ] || [ -z "$inst_bin" ]; then
+	echo "One or more built binaries not found under target/**/release" >&2
+	exit 1
+fi
+install -m 755 "$srv_bin" %{buildroot}/usr/bin/embuer-service
+install -m 755 "$clt_bin" %{buildroot}/usr/bin/embuer-client
+install -m 755 "$inst_bin" %{buildroot}/usr/bin/embuer-installer
 mkdir -p %{buildroot}/usr/lib
-install -m 644 target/release/libembuer.so %{buildroot}/usr/lib/libembuer.so
-install -m 644 target/release/libembuer.a %{buildroot}/usr/lib/libembuer.a
+libso=$(find target -type f -path "*/release/libembuer.so" -print -quit)
+liba=$(find target -type f -path "*/release/libembuer.a" -print -quit)
+if [ -z "$libso" ] || [ -z "$liba" ]; then
+	echo "Library artifacts not found under target/**/release" >&2
+	exit 1
+fi
+install -m 644 "$libso" %{buildroot}/usr/lib/libembuer.so
+install -m 644 "$liba" %{buildroot}/usr/lib/libembuer.a
 mkdir -p %{buildroot}/usr/lib/systemd/system
 install -m 644 rootfs/usr/lib/systemd/system/embuer.service %{buildroot}/usr/lib/systemd/system/embuer.service
 mkdir -p %{buildroot}/usr/share/dbus-1/system.d
