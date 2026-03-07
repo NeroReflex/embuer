@@ -627,6 +627,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            let bootfile_installed = deployment_rootfs_dir
+                .clone()
+                .join("boot")
+                .join("bzImage");
+
+            if !bootfile_installed.exists() {
+                error!(
+                    "Boot file not found in the deployment: {}",
+                    bootfile_installed.display()
+                );
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Boot file not found in the deployment",
+                )) as Box<dyn std::error::Error>);
+            }
+
             let manifet_installed = deployment_rootfs_dir
                 .clone()
                 .join("usr")
