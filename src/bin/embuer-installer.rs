@@ -596,8 +596,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match &cli.manual_script {
                 Some(script_path) => {
-                    info!("Executing manual installation script: {}", script_path);
+                    info!("Executing manual installation script: {script_path} {} {} {}", cli.deployment_name, deployment_rootfs_dir.display(), deployment_rootfs_data_dir.display());
                     let status = Command::new(script_path)
+                        .arg(&cli.deployment_name)
                         .arg(&deployment_rootfs_dir)
                         .arg(&deployment_rootfs_data_dir)
                         .status()
