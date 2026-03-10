@@ -20,7 +20,7 @@
 use std::path::PathBuf;
 
 use argh::FromArgs;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use tokio::process::Command;
 
 /// Embuer GenUpdate - Generate an installable deployment
@@ -39,6 +39,13 @@ struct EmbuerGenupdateCli {
         short = 'k'
     )]
     pub private_key_pem: PathBuf,
+
+    #[argh(
+        option,
+        description = "public key to be used to check the update, in PEM format",
+        short = 'e'
+    )]
+    pub public_key_pem: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -91,6 +98,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     info!("Generated update signature at {}", update_signature_path.display());
+
+    match cli.public_key_pem.clone() {
+        Some(pubkey_path) => {
+            if !pubkey_path.exists() {
+                error!("Public key file {} does not exist", pubkey_path.display());
+                return Err(format!("Public key file {} does not exist", pubkey_path.display()).into());
+            }
+
+            let verification_result = Command::new("openssl")
+                .arg("dgst")
+                .arg("-sha512")
+                .arg("-verify")
+                .arg(pubkey_path.to_str().unwrap())
+                .arg("-signature")
+                .arg(update_signature_path.to_str().unwrap())
+                .arg(update_btrfs_xz.to_str().unwrap())
+                .output()
+                .await
+                .inspect_err(|e| error!("Error verifying the update signature: {e}"))
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            if verification_result.status.success() {
+                info!("Update signature verification successful: {}", String::from_utf8_lossy(&verification_result.stdout).trim());
+            } else {
+                error!("Update signature verification failed: {}", String::from_utf8_lossy(&verification_result.stderr).trim());
+                return Err("Update signature verification failed".into());
+            }
+        }
+        None => {
+            warn!("Public key file not provided, skipping signature verification");
+        }
+    }
+
+    // tar cf "${BINARIES_DIR}/update_package.tar" -C "${BINARIES_DIR}" "CHANGELOG" "update.signature" "update.btrfs.xz"
+    Command::new("tar")
+        .arg("cf")
+        .arg(cli.path.join("update_package.tar").to_str().unwrap())
+        .arg("-C")
+        .arg(cli.path.to_str().unwrap())
+        .arg("CHANGELOG")
+        .arg("update.signature")
+        .arg("update.btrfs.xz")
+        .output()
+        .await
+        .inspect_err(|e| error!("Error creating the update package: {e}"))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(())
 }
