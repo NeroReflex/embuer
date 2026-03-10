@@ -46,6 +46,12 @@ struct EmbuerGenupdateCli {
         short = 'e'
     )]
     pub public_key_pem: Option<PathBuf>,
+
+    #[argh(
+        switch,
+        description = "remove intermediate files after generating the update package"
+    )]
+    pub clean: bool,
 }
 
 #[tokio::main]
@@ -144,6 +150,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .inspect_err(|e| error!("Error creating the update package: {e}"))
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+    info!("Generated update package at {}", cli.path.join("update_package.tar").display());
+
+    if cli.clean {
+        std::fs::remove_file(update_signature_path.clone())
+            .inspect_err(|e| error!("Error removing update dsignature file {}: {e}", update_signature_path.display()))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        info!("Removed update signature file {}", update_signature_path.display());
+
+        std::fs::remove_file(update_btrfs_xz.clone())
+            .inspect_err(|e| error!("Error removing deployment file {}: {e}", update_btrfs_xz.display()))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        info!("Removed deployment file {}", update_btrfs_xz.display());
+    }
 
     Ok(())
 }
