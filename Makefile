@@ -61,6 +61,8 @@ install: build-release install-header
 	install -m 755 target/release/embuer-service $(DESTDIR)/usr/bin/
 	install -m 755 target/release/embuer-client $(DESTDIR)/usr/bin/
 	install -m 755 target/release/embuer-installer $(DESTDIR)/usr/bin/
+	install -m 755 target/release/embuer-genkeys $(DESTDIR)/usr/bin/
+	install -m 755 target/release/embuer-genupdate $(DESTDIR)/usr/bin/
 	mkdir -p $(DESTDIR)/usr/lib/
 	install -m 644 target/release/libembuer.so $(DESTDIR)/usr/lib/
 	install -m 644 target/release/libembuer.a $(DESTDIR)/usr/lib/
@@ -111,4 +113,3 @@ help:
 	@echo "  run-example   - Build and run the C example"
 	@echo "  run-monitor   - Build and run the status monitor"
 	@echo "  help          - Show this help"
-

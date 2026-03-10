@@ -3,6 +3,8 @@
 *.img
 *.btrfs
 *.btrfs.xz
+*.pem
+*.signature
 
 /docker-build-out
 

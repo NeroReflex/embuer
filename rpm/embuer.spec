@@ -29,16 +29,11 @@ ls -lah .
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/bin
 # Install directly from the repository target dir where Cargo writes artifacts
-srv_bin="%{_sourcedir}/target/release/embuer-service"
-clt_bin="%{_sourcedir}/target/release/embuer-client"
-inst_bin="%{_sourcedir}/target/release/embuer-installer"
-if [ ! -f "$srv_bin" ] || [ ! -f "$clt_bin" ] || [ ! -f "$inst_bin" ]; then
-	echo "Build artifacts missing in %{_sourcedir}/target/release; ensure cargo built with --target-dir %{_sourcedir}/target" >&2
-	exit 1
-fi
-install -m 755 "$srv_bin" %{buildroot}/usr/bin/embuer-service
-install -m 755 "$clt_bin" %{buildroot}/usr/bin/embuer-client
-install -m 755 "$inst_bin" %{buildroot}/usr/bin/embuer-installer
+install -m 755 "%{_sourcedir}/target/release/embuer-service" %{buildroot}/usr/bin/embuer-service
+install -m 755 "%{_sourcedir}/target/release/embuer-client" %{buildroot}/usr/bin/embuer-client
+install -m 755 "%{_sourcedir}/target/release/embuer-installer" %{buildroot}/usr/bin/embuer-installer
+install -m 755 "%{_sourcedir}/target/release/embuer-genkeys" %{buildroot}/usr/bin/embuer-genkeys
+install -m 755 "%{_sourcedir}/target/release/embuer-genupdate" %{buildroot}/usr/bin/embuer-genupdate
 mkdir -p %{buildroot}/usr/lib
 libso="%{_sourcedir}/target/release/libembuer.so"
 liba="%{_sourcedir}/target/release/libembuer.a"

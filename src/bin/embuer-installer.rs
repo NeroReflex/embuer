@@ -103,8 +103,8 @@ struct EmbuerInstallCli {
     #[argh(option, description = "wait for input before exiting", short = 'w')]
     pub wait: Option<bool>,
 
-    #[argh(option, description = "the deployment file to replicate the install (do not include the .xz extension, it will be added automatically)")]
-    pub generate_snapshot: Option<PathBuf>,
+    #[argh(option, description = "the directory in which the deployment will be generated")]
+    pub generate_deployment: Option<PathBuf>,
 }
 
 enum Architecture {
@@ -784,11 +784,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // TODO: here if asked extract the deployment
-    if let Some(btrfs_send_file) = cli.generate_snapshot {
-        //let deployment_name = cli.deployment_name.clone();
-        //let (deployment_rootfs_dir, deployment_rootfs_data_dir) 
+    if let Some(btrfs_send_path) = cli.generate_deployment.as_ref() {
+        let btrfs_send_file = btrfs_send_path.join(format!("update.btrfs"));
     
-        // TODO: btrfs send deployment_rootfs_dir > btrfs_send_file
         let snapshot_result = btrfs.run_and_get_stdout(&["send", deployment_rootfs_dir.to_str().unwrap(), "-f", btrfs_send_file.to_str().unwrap()])
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 

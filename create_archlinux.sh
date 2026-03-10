@@ -10,7 +10,7 @@ readonly deployment_rootfs_data_dir="$3"
 echo "Creating Arch Linux deployment: $deployment_name on $deployment_rootfs_dir with data dir $deployment_rootfs_data_dir"
 
 # Install the operating system
-pacstrap -K $deployment_rootfs_dir base xz systemd-ukify iptables-nft wireless-regdb linux-firmware intel-ucode amd-ucode nano
+pacstrap -K $deployment_rootfs_dir base xz systemd-ukify iptables-nft wireless-regdb linux-firmware intel-ucode amd-ucode nano util-linux btrfs-progs
 
 mount --bind ${deployment_rootfs_dir} ${deployment_rootfs_dir}
 arch-chroot ${deployment_rootfs_dir} /bin/bash <<EOF
@@ -28,6 +28,11 @@ sed -i '/CheckSpace/s/^/#/g' /etc/pacman.conf
 # Disable check and debug for makepkg on the final image
 sed -i '/BUILDENV/s/ check/ !check/g' /etc/makepkg.conf
 sed -i '/OPTIONS/s/ debug/ !debug/g' /etc/makepkg.conf
+
+echo '# Written by systemd-localed(8) or systemd-firstboot(1), read by systemd-localed' > /etc/vconsole.conf
+echo '# and systemd-vconsole-setup(8). Use localectl(1) to update this file.' >> /etc/vconsole.conf
+echo 'KEYMAP=it2' >> /etc/vconsole.conf
+echo 'XKBLAYOUT=it' >> /etc/vconsole.conf
 
 pacman -S --noconfirm mkinitcpio
 
