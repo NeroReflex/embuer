@@ -19,7 +19,7 @@
 
 extern crate sys_mount;
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 use argh::FromArgs;
 use embuer::manifest::Manifest;
@@ -102,6 +102,9 @@ struct EmbuerInstallCli {
 
     #[argh(option, description = "wait for input before exiting", short = 'w')]
     pub wait: Option<bool>,
+
+    #[argh(option, description = "the deployment file to replicate the install (do not include the .xz extension, it will be added automatically)")]
+    pub generate_snapshot: Option<PathBuf>,
 }
 
 enum Architecture {
@@ -565,19 +568,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (deployments_dir, deployments_data_dir) =
         prepare_rootfs_partition(btrfs.clone(), &rootfs_mount_dir).await?;
 
-    // From here on let the core component take over
     let deployment_name = cli.deployment_name.clone();
+    let (deployment_rootfs_dir, deployment_rootfs_data_dir) =
+        prepare_deployment_directories(
+            btrfs.clone(),
+            &deployments_dir,
+            &deployments_data_dir,
+            &deployment_name,
+        )
+        .await?;
+
+    // From here on let the core component take over
     match cli.deployment_source.as_str() {
         "manual" => {
-            let (deployment_rootfs_dir, deployment_rootfs_data_dir) =
-                prepare_deployment_directories(
-                    btrfs.clone(),
-                    &deployments_dir,
-                    &deployments_data_dir,
-                    &deployment_name,
-                )
-                .await?;
-
             // If a manual kernel source was specified, build and install it now
             if let Some(kernel_src) = cli.manual_kernel.as_ref() {
                 info!(
@@ -778,6 +781,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!("Installed deployment: {}", installed_deployment_name);
         }
+    };
+
+    // TODO: here if asked extract the deployment
+    if let Some(btrfs_send_file) = cli.generate_snapshot {
+        //let deployment_name = cli.deployment_name.clone();
+        //let (deployment_rootfs_dir, deployment_rootfs_data_dir) 
+    
+        // TODO: btrfs send deployment_rootfs_dir > btrfs_send_file
+        let snapshot_result = btrfs.run_and_get_stdout(&["send", deployment_rootfs_dir.to_str().unwrap(), "-f", btrfs_send_file.to_str().unwrap()])
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        info!("Generated deployment snapshot to {}: {}", btrfs_send_file.display(), snapshot_result.trim());
+
+        Command::new("xz")
+            .arg("-9e")
+            .arg("--memory=95%")
+            .arg("-T0")
+            .arg(btrfs_send_file.to_str().unwrap())
+            .output()
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     };
 
     Ok(())

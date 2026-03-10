@@ -1,6 +1,6 @@
 #!/bin/bash
 
-./target/debug/embuer-installer -i test.img --arch "amd64" --bootloader "refind" --deployment-name "archlinux" --deployment-source "manual" --manual-script "./create_archlinux.sh"
+./target/debug/embuer-installer -i test.img --arch "amd64" --bootloader "refind" --deployment-name "archlinux" --deployment-source "manual" --manual-script "./create_archlinux.sh" --generate-snapshot "archlinux.btrfs"
 
 # The deployment subvolume is made read-only by the embuer-installer executable when we are finished
 
