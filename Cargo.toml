@@ -81,6 +81,8 @@ assets = [
     ["target/release/embuer-client", "usr/bin/", "755"],
     ["target/release/embuer-installer", "usr/bin/", "755"],
     ["target/release/embuer-service", "usr/bin/", "755"],
+    ["target/release/embuer-genupdate", "usr/bin/", "755"],
+    ["target/release/embuer-genkeys", "usr/bin/", "755"],
     ["target/release/libembuer.so", "usr/lib/", "755"],
     ["target/release/test-signature", "usr/bin/", "755"],
 ]
