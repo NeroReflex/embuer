@@ -71,6 +71,8 @@ fi
 /usr/bin/embuer-service
 /usr/bin/embuer-client
 /usr/bin/embuer-installer
+/usr/bin/embuer-genupdate
+/usr/bin/embuer-genkeys
 /usr/lib/libembuer.so
 /usr/lib/libembuer.a
 /usr/lib/systemd/system/embuer.service
