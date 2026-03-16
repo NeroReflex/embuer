@@ -25,9 +25,12 @@ use argh::FromArgs;
 use embuer::manifest::Manifest;
 use futures::TryStreamExt;
 use log::{debug, error, info, warn};
+use owo_colors::OwoColorize;
 use reqwest::Client;
 use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio_tar::Archive;
 use tokio_util::io::StreamReader;
 
 /// Embuer Client - Control and monitor the Embuer update service
@@ -143,6 +146,103 @@ impl Drop for MountType {
             }
         }
     }
+}
+
+/// Render a changelog in a boxed, colored style similar to `embuer-client`.
+fn render_changelog_tui(changelog: &str, source: &str) {
+    let border_top =
+        "╔════════════════════════════════════════════════════════════════════════════╗";
+    let border_mid =
+        "╠════════════════════════════════════════════════════════════════════════════╣";
+    let border_bot =
+        "╚════════════════════════════════════════════════════════════════════════════╝";
+    let side = "║";
+
+    println!("{}", border_top.bright_cyan());
+    println!(
+        "{} {} {:<66} {}",
+        side.bright_cyan(),
+        "📦 INSTALLING UPDATE".bright_yellow().bold(),
+        "",
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
+    println!(
+        "{} {} {:<58} {}",
+        side.bright_cyan(),
+        "Source:".bright_white().bold(),
+        source.cyan(),
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
+    println!(
+        "{} {} {:<66} {}",
+        side.bright_cyan(),
+        "📝 CHANGELOG".bright_white().bold(),
+        "",
+        side.bright_cyan()
+    );
+    println!("{}", border_mid.bright_cyan());
+
+    for line in changelog.lines() {
+        let formatted_line = if line.starts_with("New Features:")
+            || line.starts_with("Bug Fixes:")
+            || line.starts_with("Performance:")
+            || line.starts_with("Breaking Changes:")
+        {
+            line.bright_yellow().bold().to_string()
+        } else if line.starts_with("- ") {
+            format!("  {}", line.bright_white())
+        } else {
+            line.white().to_string()
+        };
+        println!(
+            "{} {:<74} {}",
+            side.bright_cyan(),
+            formatted_line,
+            side.bright_cyan()
+        );
+    }
+
+    println!("{}", border_bot.bright_cyan());
+}
+
+/// Given a streaming reader for an update package (tar archive),
+/// locate the `update.btrfs.xz` entry and return it as a streaming reader.
+async fn extract_update_stream_from_package<R>(
+    reader: R,
+) -> Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>, Box<dyn std::error::Error>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    let mut archive = Archive::new(reader);
+    let mut entries = archive.entries()?;
+
+    let mut changelog: Option<String> = None;
+
+    while let Some(entry) = entries.try_next().await? {
+        let path = entry.path()?;
+        if path.as_os_str() == "CHANGELOG" {
+            let mut content = String::new();
+            let mut reader = BufReader::new(entry);
+            reader.read_to_string(&mut content).await?;
+            changelog = Some(content);
+        } else if path.as_os_str() == "update.btrfs.xz" {
+            info!("Found update.btrfs.xz inside update package");
+            if let Some(ref cl) = changelog {
+                // Best-effort pretty changelog display; failures here should not abort install
+                let source_str = "update package";
+                render_changelog_tui(cl, source_str);
+            }
+            let update_stream = Box::pin(entry) as Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>;
+            return Ok(update_stream);
+        }
+    }
+
+    Err(Box::new(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "update.btrfs.xz not found in update package",
+    )))
 }
 
 #[tokio::main]
@@ -701,16 +801,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let wrapped_reader: Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>> =
                 if local_path.exists() {
                     info!(
-                        "Using local file as deployment source: {}",
+                        "Using local file as deployment source (update package): {}",
                         local_path.display()
                     );
                     let file = tokio::fs::File::open(&local_path).await?;
-                    Box::pin(file)
+                    extract_update_stream_from_package(file).await?
                 } else if cli.deployment_source.as_str().starts_with("https://")
                     || cli.deployment_source.as_str().starts_with("http://")
                 {
                     let url = cli.deployment_source.clone();
-                    info!("Downloading deployment from URL: {}", url);
+                    info!(
+                        "Downloading deployment update package from URL: {}",
+                        url
+                    );
 
                     let client = Client::new();
                     let resp = client
@@ -728,9 +831,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let byte_stream = resp.bytes_stream().map_err(std::io::Error::other);
                     let stream_reader = StreamReader::new(byte_stream);
 
-                    // The core.install_update path handles xz decompression internally.
-                    // Just pass the raw HTTP stream reader through.
-                    Box::pin(stream_reader)
+                    // The update package is a tar archive; extract the inner update.btrfs.xz
+                    extract_update_stream_from_package(stream_reader).await?
                 } else {
                     error!(
                         "Deployment source not found or unsupported: {}",
