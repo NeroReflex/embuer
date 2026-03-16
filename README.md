@@ -30,6 +30,7 @@ Embuer is organized as follows:
 
 - **embuer-service**: A D-Bus service binary that runs as a daemon and manages system updates
 - **embuer-client**: A CLI client to interact with the service (query status, trigger updates)
+- **embuer-installer**: A standalone installer that can partition a disk/image, install a bootloader, and lay down an initial deployment from an Embuer update package
 - **libembuer**: A library with three variants:
   - Rust library (`rlib`) for Rust applications
   - C shared library (`cdylib`) for dynamic linking
@@ -46,6 +47,7 @@ cargo build --release
 This will produce:
 - `target/release/embuer-service` - The D-Bus service daemon
 - `target/release/embuer-client` - The CLI client
+- `target/release/embuer-installer` - The installer for creating bootable disks/images from update packages
 - `target/release/libembuer.so` - Shared library
 - `target/release/libembuer.a` - Static library
 
@@ -220,6 +222,10 @@ update package:
 ```sh
 tar -cf update.tar CHANGELOG update.btrfs.xz update.signature
 ```
+
+The resulting `update.tar` can be used both by the running Embuer service (via `embuer-client`) and by the standalone `embuer-installer` tool.
+
+For details on using `embuer-installer` (including streaming installs directly from a `.tar` over HTTP without pre-downloading it), see `INSTALLER.md`.
 
 ## License
 [GNU General Public License v2.0 or later](LICENSE.md)
