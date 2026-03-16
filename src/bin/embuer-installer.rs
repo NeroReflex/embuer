@@ -669,14 +669,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prepare_rootfs_partition(btrfs.clone(), &rootfs_mount_dir).await?;
 
     let deployment_name = cli.deployment_name.clone();
-    let (deployment_rootfs_dir, deployment_rootfs_data_dir) =
-        prepare_deployment_directories(
-            btrfs.clone(),
-            &deployments_dir,
-            &deployments_data_dir,
-            &deployment_name,
-        )
-        .await?;
+    let (deployment_rootfs_dir, deployment_rootfs_data_dir) = match cli.deployment_source.as_str() {
+        "manual" => {
+            prepare_deployment_directories(
+                btrfs.clone(),
+                &deployments_dir,
+                &deployments_data_dir,
+                &deployment_name,
+            )
+            .await?
+        }
+        _ => {
+            // For non-manual installs, the actual deployment subvolume name is determined
+            // by the incoming btrfs stream (e.g. "chimeraos_50"). We cannot know it yet,
+            // so we only compute the paths here; the subvolumes themselves will be created
+            // after install using the real name.
+            let deployment_rootfs_dir = deployments_dir.join(&deployment_name);
+            let deployments_data_rootfs_dir = deployments_data_dir.join(&deployment_name);
+            (deployment_rootfs_dir, deployments_data_rootfs_dir)
+        }
+    };
 
     // From here on let the core component take over
     match cli.deployment_source.as_str() {
@@ -865,7 +877,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             std::io::stdin().read_line(&mut input)?;
                         }
 
-                        name
+                        let real_name = name;
+
+                        // If the stream-provided deployment name differs from the CLI one,
+                        // create the corresponding deployments_data layout using the real name
+                        // so that the system can boot correctly.
+                        if real_name != deployment_name {
+                            let real_rootfs_dir = deployments_dir.join(&real_name);
+                            let real_data_dir = deployments_data_dir.join(&real_name);
+                            info!(
+                                "Deployment name from stream ({}) differs from requested name ({}); creating data subvolumes for the real name",
+                                real_name, deployment_name
+                            );
+                            prepare_deployment_directories(
+                                btrfs.clone(),
+                                &deployments_dir,
+                                &deployments_data_dir,
+                                &real_name,
+                            )
+                            .await?;
+
+                            // Update the variables used later for overlays/default subvol
+                            let _ = deployment_rootfs_dir;
+                            let _ = deployment_rootfs_data_dir;
+                        } else {
+                            // When names match, ensure the data subvolume layout exists
+                            prepare_deployment_directories(
+                                btrfs.clone(),
+                                &deployments_dir,
+                                &deployments_data_dir,
+                                &deployment_name,
+                            )
+                            .await?;
+                        }
+
+                        real_name
                     }
                     None => {
                         error!("Failed to install deployment: no deployment name returned");
