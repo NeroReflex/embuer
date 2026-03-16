@@ -879,37 +879,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let real_name = name;
 
-                        // If the stream-provided deployment name differs from the CLI one,
-                        // create the corresponding deployments_data layout using the real name
-                        // so that the system can boot correctly.
-                        if real_name != deployment_name {
-                            let real_rootfs_dir = deployments_dir.join(&real_name);
-                            let real_data_dir = deployments_data_dir.join(&real_name);
+                        // Ensure the deployments_data layout exists for the actual deployment
+                        // name created by the btrfs stream. We *do not* create the rootfs
+                        // subvolume here, as it already exists.
+                        let data_name = if real_name != deployment_name {
                             info!(
                                 "Deployment name from stream ({}) differs from requested name ({}); creating data subvolumes for the real name",
                                 real_name, deployment_name
                             );
-                            prepare_deployment_directories(
-                                btrfs.clone(),
-                                &deployments_dir,
-                                &deployments_data_dir,
-                                &real_name,
-                            )
-                            .await?;
-
-                            // Update the variables used later for overlays/default subvol
-                            let _ = deployment_rootfs_dir;
-                            let _ = deployment_rootfs_data_dir;
+                            real_name.as_str()
                         } else {
-                            // When names match, ensure the data subvolume layout exists
-                            prepare_deployment_directories(
-                                btrfs.clone(),
-                                &deployments_dir,
-                                &deployments_data_dir,
-                                &deployment_name,
-                            )
-                            .await?;
-                        }
+                            deployment_name.as_str()
+                        };
+
+                        let _real_data_dir =
+                            prepare_deployment_data_directories(btrfs.clone(), &deployments_data_dir, data_name).await?;
 
                         real_name
                     }
@@ -1136,6 +1120,51 @@ async fn prepare_deployment_directories(
     btrfs.subvolume_set_ro(&opt_overlay_dir)?;
 
     Ok((deployment_rootfs_dir, deployments_data_rootfs_dir))
+}
+
+/// Prepare only the deployments_data layout for an existing deployment subvolume.
+/// This is used for non-manual installs where the rootfs subvolume is created
+/// by the incoming btrfs stream (install_update) and we only need to create
+/// the matching data/overlay structure.
+async fn prepare_deployment_data_directories(
+    btrfs: Arc<embuer::btrfs::Btrfs>,
+    deployments_data_dir: &std::path::Path,
+    deployment_name: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let deployments_data_rootfs_dir = deployments_data_dir.join(deployment_name);
+
+    if !deployments_data_rootfs_dir.exists() {
+        let result = btrfs.subvolume_create(&deployments_data_rootfs_dir)?;
+        debug!("{}", result.trim());
+    }
+
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("etc_overlay/upperdir"))?;
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("etc_overlay/workdir"))?;
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("var_overlay/upperdir"))?;
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("var_overlay/workdir"))?;
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("root_overlay/upperdir"))?;
+    std::fs::create_dir_all(deployments_data_rootfs_dir.join("root_overlay/workdir"))?;
+
+    let usr_overlay_dir = deployments_data_rootfs_dir.join("usr_overlay");
+    if !usr_overlay_dir.exists() {
+        let result = btrfs.subvolume_create(&usr_overlay_dir)?;
+        debug!("{}", result.trim());
+    }
+    std::fs::create_dir_all(usr_overlay_dir.join("upperdir"))?;
+    std::fs::create_dir_all(usr_overlay_dir.join("workdir"))?;
+
+    let opt_overlay_dir = deployments_data_rootfs_dir.join("opt_overlay");
+    if !opt_overlay_dir.exists() {
+        let result = btrfs.subvolume_create(&opt_overlay_dir)?;
+        debug!("{}", result.trim());
+    }
+    std::fs::create_dir_all(opt_overlay_dir.join("upperdir"))?;
+    std::fs::create_dir_all(opt_overlay_dir.join("workdir"))?;
+
+    btrfs.subvolume_set_ro(&usr_overlay_dir)?;
+    btrfs.subvolume_set_ro(&opt_overlay_dir)?;
+
+    Ok(deployments_data_rootfs_dir)
 }
 
 async fn prepare_rootfs_partition(
